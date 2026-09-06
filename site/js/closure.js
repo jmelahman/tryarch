@@ -36,6 +36,9 @@ const providedName = (spec) => parseDepend(spec).name;
 //
 // `known` maps the names already in the guest to their builds: they
 // satisfy dependencies but are neither fetched nor reported again.
+// `wants` is what has to be there without being a root itself: a
+// recipe's dependencies and the tools that build it, as
+// `{ via, specs }`, resolved the way a package's own dependencies are.
 // Resolves to { builds, problems }: the builds fetched by this walk in
 // completion order, and what could not be resolved. A dependency that
 // cannot be found is reported and skipped rather than failing the walk:
@@ -45,6 +48,7 @@ export async function walkClosure(
   roots,
   {
     known = new Map(),
+    wants = [],
     onDiscover = () => {},
     onPackage = async () => {},
     onBytes = () => {},
@@ -268,6 +272,26 @@ export async function walkClosure(
     enqueue(root, { era, root: true });
   }
 
-  await Promise.all(Array.from({ length: PACKAGE_CONCURRENCY }, worker));
+  // The wants resolve alongside the first downloads. They count as
+  // work in flight so a worker that finds the queue empty waits for
+  // them instead of returning.
+  const wanted = (async () => {
+    active += 1;
+    try {
+      for (const { via, specs } of wants) {
+        await Promise.all(
+          specs.map((spec) => resolve(spec, { era: null, via })),
+        );
+      }
+    } finally {
+      active -= 1;
+      wake();
+    }
+  })();
+
+  await Promise.all([
+    wanted,
+    ...Array.from({ length: PACKAGE_CONCURRENCY }, worker),
+  ]);
   return { builds, problems };
 }

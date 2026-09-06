@@ -17,6 +17,12 @@ fields the page actually uses, and writes:
   provides/<xx>.json  who provides `sh`, `libz.so`, ... for dependency
                   resolution
 
+The AUR gets the same three files under `aur/`, built from the AUR's
+own metadata dump. That one is not an optimisation: aur.archlinux.org
+sends no CORS headers, so a browser cannot ask it anything, and a dump
+turned into static files at deploy time is the page's only way to know
+an AUR package exists.
+
 The shard is FNV-1a over the name, which the page recomputes in JS
 (`Math.imul`) — see `shardOf` in site/js/index.js. Output is sorted and
 separator-tight so an unchanged repo produces byte-identical files.
@@ -29,6 +35,7 @@ the db itself when that happens.
 import argparse
 import collections
 import datetime
+import gzip
 import http.client
 import io
 import json
@@ -49,6 +56,9 @@ MIRRORS = (
     "https://yonderly.org/mirrors/archlinux/",
 )
 
+# One gzip'd JSON array of every package the AUR publishes, ~14 MB.
+AUR_DUMP = "https://aur.archlinux.org/packages-meta-ext-v1.json.gz"
+
 TIMEOUT = 60
 
 # 256 shards: ~60 packages each over core+extra, a few KB per fetch.
@@ -57,6 +67,12 @@ FNV_PRIME = 0x01000193
 
 # Enough of a description to rank a search hit and show it in a row.
 DESC_LIMIT = 120
+
+# `aur/names.json` covers ~119k packages in one file: ~8 MB even with
+# the description cut this short, so the page fetches it lazily — only
+# once a search has to look past core and extra. The shard keeps the
+# full DESC_LIMIT copy for the row itself.
+AUR_DESC_LIMIT = 80
 
 # Older dbs split the dependency sections into a sibling file.
 DB_FILES = ("desc", "depends")
@@ -273,6 +289,112 @@ def write_index(outdir, pkgs, provides, repos, arch, generated):
     write_shards(outdir, "provides", provides)
 
 
+def aur_dump(url):
+    """Every package the AUR publishes, from its own metadata dump.
+
+    aur.archlinux.org sends no `Access-Control-Allow-Origin`, so the
+    page cannot query the AUR at runtime at all; the dump is fetched
+    here and served from the site's own origin instead.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+            raw = response.read()
+        dump = json.loads(gzip.decompress(raw))
+    # Treated like an unreachable mirror: exit non-zero so the deploy
+    # fails and the last good site — index and all — stays published.
+    except (OSError, http.client.HTTPException, ValueError) as err:
+        raise SystemExit(f"index: {url}: {err}")
+
+    if not isinstance(dump, list):
+        raise SystemExit(f"index: {url}: not a JSON array of packages")
+    return dump
+
+
+def aur_entry_of(package):
+    """The indexed form of one dump record, or None if it is unusable.
+
+    The dump carries a dozen fields the page never reads — licenses,
+    keywords, submitter, ids — and this keeps the ones that rank a
+    search hit and drive a build. Absent and empty lists are both left
+    out: at 119k packages, writing `[]` costs megabytes.
+    """
+    name = package.get("Name")
+    if not name:
+        return None
+
+    entry = {
+        "v": package.get("Version"),
+        "desc": (package.get("Description") or "")[:DESC_LIMIT],
+        "url": package.get("URL"),
+        # Popularity is a six-decimal float that drifts every day; the
+        # page ranks by two, and rounding keeps the shard from churning
+        # on noise below what it shows.
+        "pop": round(package.get("Popularity") or 0.0, 2),
+        "votes": package.get("NumVotes") or 0,
+        # Null unless someone has flagged the package out of date.
+        "ood": package.get("OutOfDate"),
+        "m": package.get("LastModified"),
+    }
+    # As in the official shards, a pkgbase equal to the name is implied.
+    base = package.get("PackageBase")
+    if base and base != name:
+        entry["base"] = base
+    for key, field in (
+        ("d", "Depends"),
+        ("md", "MakeDepends"),
+        ("cd", "CheckDepends"),
+        ("p", "Provides"),
+    ):
+        values = package.get(field)
+        if values:
+            entry[key] = list(values)
+    return name, entry
+
+
+def index_aur(dump):
+    """Fold the dump into `(pkgs, provides)`.
+
+    There is no repo priority to keep here — the AUR is one namespace —
+    so a provided name just lists its providers alphabetically.
+    """
+    pkgs = {}
+    providers = collections.defaultdict(set)
+
+    for record in dump:
+        found = aur_entry_of(record)
+        if found is None:
+            continue
+        name, entry = found
+        pkgs[name] = entry
+        for provided in entry.get("p", ()):
+            provided = bare_name(provided)
+            if provided:
+                providers[provided].add(name)
+
+    provides = {provided: sorted(found) for provided, found in providers.items()}
+    return pkgs, provides
+
+
+def write_aur_index(outdir, pkgs, provides, generated):
+    """Write names.json and the two shard directories under `aur/`."""
+    directory = os.path.join(outdir, "aur")
+    os.makedirs(directory, exist_ok=True)
+    names = {name: entry["desc"][:AUR_DESC_LIMIT] for name, entry in pkgs.items()}
+    with open(os.path.join(directory, "names.json"), "w") as f:
+        json.dump(
+            {
+                "generated": generated,
+                "count": len(pkgs),
+                "names": names,
+            },
+            f,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    write_shards(directory, "pkgs", pkgs)
+    write_shards(directory, "provides", provides)
+
+
 def main():
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("outdir", help="directory to write the index into")
@@ -290,6 +412,11 @@ def main():
         "--repos", default="core,extra", help="repos, in priority order"
     )
     parser.add_argument("--arch", default="x86_64")
+    parser.add_argument(
+        "--no-aur",
+        action="store_true",
+        help="skip the AUR index and its separate 14 MB download",
+    )
     args = parser.parse_args()
 
     repos = [repo for repo in args.repos.split(",") if repo]
@@ -311,6 +438,21 @@ def main():
     print(
         f"index: {len(pkgs)} packages from {', '.join(repos)}"
         f" ({generated}) -> {args.outdir}",
+        file=sys.stderr,
+    )
+
+    if args.no_aur:
+        return
+
+    print(f"index: downloading {AUR_DUMP}", file=sys.stderr)
+    aur_pkgs, aur_provides = index_aur(aur_dump(AUR_DUMP))
+    if not aur_pkgs:
+        raise SystemExit("index: the AUR dump held no usable package")
+    write_aur_index(args.outdir, aur_pkgs, aur_provides, generated)
+
+    print(
+        f"index: {len(aur_pkgs)} AUR packages"
+        f" ({generated}) -> {os.path.join(args.outdir, 'aur')}",
         file=sys.stderr,
     )
 

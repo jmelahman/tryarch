@@ -172,6 +172,24 @@ test("a dead source gives up after four attempts", async () => {
   assert.equal(attempts, 4);
 });
 
+test("a caller can ask for fewer attempts", async () => {
+  // A recipe's sources are mostly on hosts that refuse the page, and a
+  // refusal fails every attempt identically: the backoff buys nothing
+  // and there are a dozen of them per recipe.
+  const url = "https://downloads.invalid/demo-1.0.tar.gz";
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    throw new TypeError("Failed to fetch");
+  };
+
+  await assert.rejects(
+    () => fetchWithProgress(url, { attempts: 2 }),
+    /Failed to fetch/,
+  );
+  assert.equal(attempts, 2);
+});
+
 test("warmHttpCache reads the body and reports its size", async () => {
   globalThis.fetch = async () => ok(BODY);
   let total = null;

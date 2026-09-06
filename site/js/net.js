@@ -68,8 +68,15 @@ async function check(bytes, digest) {
 // A 404 is not retried. Mirrors delete superseded packages within hours
 // of a sync, so a missing file is an answer, not a hiccup: the error
 // carries `.status = 404` and the caller moves to the next mirror.
+//
+// `attempts` overrides how many times a failure is retried. A mirror is
+// worth all four — the file is on it and the boot needs it — but a
+// caller with many URLs and a low expectation of any of them working (a
+// recipe's sources, most of which no page is allowed to read) asks for
+// fewer rather than paying the backoff over and over.
 export async function fetchWithProgress(url, options = {}) {
   const digest = options.digest ?? null;
+  const attempts = options.attempts ?? ATTEMPTS;
 
   const hit = await cachedResponse(url);
   if (hit !== null) {
@@ -118,7 +125,7 @@ export async function fetchWithProgress(url, options = {}) {
         throw gone;
       }
 
-      if (attempt >= ATTEMPTS) {
+      if (attempt >= attempts) {
         log(`giving up on ${url} after ${attempt} attempts: ${err.message}`);
         throw new Error(`${url}: ${err.message}`);
       }

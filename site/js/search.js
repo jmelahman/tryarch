@@ -8,9 +8,11 @@ import { SEARCH_LIMIT } from "./config.js";
 // How long the box sits still before a keystroke becomes a search.
 const DEBOUNCE_MS = 120;
 
-// The repos with a colour of their own; anything else — a repo somebody
-// pasted the URL of — shares one.
-const KNOWN_REPOS = new Set(["core", "extra", "archive"]);
+// The repos with a colour of their own — the official two, the
+// Archive's older builds, a recipe out of the AUR and the package the
+// guest made from one; anything else — a repo somebody pasted the URL
+// of — shares one.
+const KNOWN_REPOS = new Set(["core", "extra", "archive", "aur", "built"]);
 
 export const repoClass = (repo) =>
   `repo repo-${KNOWN_REPOS.has(repo) ? repo : "other"}`;
@@ -18,11 +20,15 @@ export const repoClass = (repo) =>
 export class PackagePicker {
   // onPick hears one hit ({name, desc, repo}) each time one is chosen;
   // the page owns the selection, since packages also arrive from the
-  // spec lane and from the link the reader followed.
-  constructor({ input, results, onPick }) {
+  // spec lane and from the link the reader followed. `search` is how a
+  // query becomes hits, so the AUR lane gets this picker by handing it
+  // searchAur instead of the index's own search.
+  constructor({ input, results, onPick, search = searchNames }) {
     this.input = input;
     this.results = results;
     this.onPick = onPick;
+    // Not `this.search`: that is the method this one is called from.
+    this.searchFor = search;
     this.hits = [];
     this.selected = -1;
 
@@ -41,7 +47,7 @@ export class PackagePicker {
       return;
     }
 
-    const hits = await searchNames(query, SEARCH_LIMIT);
+    const hits = await this.searchFor(query, SEARCH_LIMIT);
     // A slow answer for a query the reader has already typed past is
     // not the answer to what is in the box now.
     if (this.input.value.trim() !== query) {

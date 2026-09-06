@@ -6,17 +6,23 @@ them — a gzip'd tar of `<name>-<version>/desc` — small enough to read.
 
 The shard vectors matter beyond this file: site/js/index.js recomputes
 the same FNV-1a in JS, and its test asserts the same numbers.
+
+The AUR half is fed a handful of records shaped like the AUR's metadata
+dump; nothing here touches the network.
 """
 
+import contextlib
 import gzip
 import importlib.util
 import io
 import json
 import os
 import shutil
+import sys
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -407,6 +413,235 @@ class WriteTest(unittest.TestCase):
                 with open(path, "rb") as f:
                     after[os.path.relpath(path, self.out)] = f.read()
         self.assertEqual(before, after)
+
+
+# Shaped like a record in packages-meta-ext-v1.json.gz, down to the
+# fields the indexer drops.
+AUR_DUMP = [
+    {
+        "ID": 2131229,
+        "Name": "yay-bin",
+        "PackageBaseID": 117489,
+        "PackageBase": "yay-bin",
+        "Version": "13.0.1-1",
+        "Description": "Yet another yogurt. Pre-compiled.",
+        "URL": "https://github.com/Jguer/yay",
+        "NumVotes": 369,
+        "Popularity": 5.321868,
+        "OutOfDate": None,
+        "Maintainer": "jguer",
+        "FirstSubmitted": 1480777574,
+        "LastModified": 1781904582,
+        "URLPath": "/cgit/aur.git/snapshot/yay-bin.tar.gz",
+        "Depends": ["pacman>6.1", "git"],
+        "OptDepends": ["sudo"],
+        "Conflicts": ["yay"],
+        "Provides": ["yay=13"],
+        "License": ["GPL-3.0-or-later"],
+        "Keywords": ["AUR", "helper"],
+    },
+    {
+        # A split package (pkgbase differs), flagged out of date, and
+        # carrying every kind of dependency list.
+        "Name": "long-pkg",
+        "PackageBase": "long-base",
+        "Version": "2:1.0.r5.gdeadbee-1",
+        "Description": LONG_DESC,
+        "URL": "https://example.invalid/long",
+        "NumVotes": 3,
+        "Popularity": 0.025175,
+        "OutOfDate": 1770000000,
+        "Maintainer": None,
+        "LastModified": 1700000000,
+        "Depends": ["glibc"],
+        "MakeDepends": ["git", "go"],
+        "CheckDepends": ["python-pytest"],
+        "Provides": ["yay", "long-pkg"],
+    },
+    {
+        # The bare minimum the dump ever carries: no lists at all, and
+        # a description and URL that are present but null.
+        "Name": "bare",
+        "PackageBase": "bare",
+        "Version": "1-1",
+        "Description": None,
+        "URL": None,
+        "NumVotes": 0,
+        "Popularity": 0,
+        "OutOfDate": None,
+        "LastModified": 1,
+    },
+    # No Name: nothing to key it by, so nothing to index.
+    {"PackageBase": "ghost", "Version": "1-1", "Description": "never written"},
+]
+
+
+class AurEntryTest(unittest.TestCase):
+    def entry(self, name):
+        found = indexer.aur_entry_of(
+            next(record for record in AUR_DUMP if record.get("Name") == name)
+        )
+        assert found is not None
+        return found[1]
+
+    def test_fields(self):
+        yay = self.entry("yay-bin")
+        self.assertEqual(yay["v"], "13.0.1-1")
+        self.assertEqual(yay["desc"], "Yet another yogurt. Pre-compiled.")
+        self.assertEqual(yay["url"], "https://github.com/Jguer/yay")
+        self.assertEqual(yay["votes"], 369)
+        self.assertEqual(yay["m"], 1781904582)
+        # The constraint stays in the recorded dependency and provide;
+        # only the index key is bare.
+        self.assertEqual(yay["d"], ["pacman>6.1", "git"])
+        self.assertEqual(yay["p"], ["yay=13"])
+
+    def test_popularity_is_rounded(self):
+        self.assertEqual(self.entry("yay-bin")["pop"], 5.32)
+        self.assertEqual(self.entry("long-pkg")["pop"], 0.03)
+        self.assertEqual(self.entry("bare")["pop"], 0.0)
+
+    def test_out_of_date(self):
+        self.assertIsNone(self.entry("yay-bin")["ood"])
+        self.assertEqual(self.entry("long-pkg")["ood"], 1770000000)
+
+    def test_base_only_when_it_differs(self):
+        self.assertNotIn("base", self.entry("yay-bin"))
+        self.assertEqual(self.entry("long-pkg")["base"], "long-base")
+
+    def test_dependency_lists(self):
+        long_pkg = self.entry("long-pkg")
+        self.assertEqual(long_pkg["d"], ["glibc"])
+        self.assertEqual(long_pkg["md"], ["git", "go"])
+        self.assertEqual(long_pkg["cd"], ["python-pytest"])
+
+    def test_absent_lists_are_omitted(self):
+        # `[]` over 119k packages is megabytes of nothing.
+        bare = self.entry("bare")
+        for key in ("d", "md", "cd", "p"):
+            self.assertNotIn(key, bare)
+        self.assertNotIn("md", self.entry("yay-bin"))
+
+    def test_null_strings_become_empty_or_null(self):
+        bare = self.entry("bare")
+        self.assertEqual(bare["desc"], "")
+        self.assertIsNone(bare["url"])
+
+    def test_description_is_truncated(self):
+        self.assertEqual(self.entry("long-pkg")["desc"], LONG_DESC[:120])
+
+    def test_a_record_without_a_name_is_skipped(self):
+        self.assertIsNone(indexer.aur_entry_of({"PackageBase": "ghost"}))
+
+
+class AurIndexTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.pkgs, cls.provides = indexer.index_aur(AUR_DUMP)
+
+    def test_packages(self):
+        self.assertEqual(set(self.pkgs), {"yay-bin", "long-pkg", "bare"})
+
+    def test_provides_strips_the_constraint(self):
+        # `yay=13` and a bare `yay`, from two packages.
+        self.assertEqual(self.provides["yay"], ["long-pkg", "yay-bin"])
+
+    def test_provides_is_only_what_is_provided(self):
+        self.assertNotIn("pacman", self.provides)
+        self.assertNotIn("bare", self.provides)
+
+
+class AurWriteTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="tryarch-aur-")
+        self.out = os.path.join(self.tmp, "index")
+        pkgs, provides = indexer.index_aur(AUR_DUMP)
+        indexer.write_aur_index(self.out, pkgs, provides, GENERATED)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def read(self, *parts):
+        with open(os.path.join(self.out, "aur", *parts)) as f:
+            return json.load(f)
+
+    def test_names(self):
+        names = self.read("names.json")
+        self.assertEqual(names["generated"], GENERATED)
+        self.assertEqual(names["count"], 3)
+        self.assertEqual(sorted(names["names"]), ["bare", "long-pkg", "yay-bin"])
+        self.assertEqual(names["names"]["bare"], "")
+
+    def test_names_are_truncated_shorter_than_the_shard(self):
+        names = self.read("names.json")
+        self.assertEqual(names["names"]["long-pkg"], LONG_DESC[:80])
+        shard = self.read("pkgs", f"{indexer.shard_of('long-pkg')}.json")
+        self.assertEqual(shard["long-pkg"]["desc"], LONG_DESC[:120])
+
+    def test_shard_files(self):
+        for name in ("yay-bin", "long-pkg", "bare"):
+            shard = self.read("pkgs", f"{indexer.shard_of(name)}.json")
+            self.assertIn(name, shard)
+
+    def test_provides_shard(self):
+        shard = self.read("provides", f"{indexer.shard_of('yay')}.json")
+        self.assertEqual(shard["yay"], ["long-pkg", "yay-bin"])
+
+    def test_only_non_empty_shards_are_written(self):
+        # Three packages cannot fill 256 shards.
+        shards = {indexer.shard_of(name) for name in ("yay-bin", "long-pkg", "bare")}
+        written = os.listdir(os.path.join(self.out, "aur", "pkgs"))
+        self.assertEqual(sorted(written), sorted(f"{shard}.json" for shard in shards))
+
+    def test_output_is_separator_tight(self):
+        with open(os.path.join(self.out, "aur", "names.json")) as f:
+            text = f.read()
+        self.assertNotIn(", ", text)
+        self.assertNotIn(": ", text)
+
+    def test_the_official_index_is_untouched(self):
+        # Everything the AUR writes lives under aur/.
+        self.assertEqual(os.listdir(self.out), ["aur"])
+
+
+class MainTest(unittest.TestCase):
+    """`main()` end to end, with the dbs on disk and the dump faked."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="tryarch-main-")
+        self.db_dir = os.path.join(self.tmp, "db")
+        os.makedirs(self.db_dir)
+        write_db(os.path.join(self.db_dir, "core.db"), CORE)
+        write_db(os.path.join(self.db_dir, "extra.db"), EXTRA)
+        self.out = os.path.join(self.tmp, "index")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def run_main(self, *flags):
+        argv = ["build-index.py", self.out, "--db-dir", self.db_dir, *flags]
+        # The dbs come off disk and the dump out of the fixture: the
+        # download is the only part of either half that needs a network.
+        with (
+            unittest.mock.patch.object(sys, "argv", argv),
+            unittest.mock.patch.object(indexer, "aur_dump", lambda url: AUR_DUMP),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            indexer.main()
+
+    def test_no_aur_writes_nothing_under_aur(self):
+        self.run_main("--no-aur")
+        self.assertTrue(os.path.exists(os.path.join(self.out, "names.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.out, "aur")))
+
+    def test_the_aur_index_is_written_beside_the_official_one(self):
+        self.run_main()
+        with open(os.path.join(self.out, "aur", "names.json")) as f:
+            names = json.load(f)
+        self.assertEqual(names["count"], 3)
+        # The official names.json is the one with the repos in it.
+        with open(os.path.join(self.out, "names.json")) as f:
+            self.assertEqual(json.load(f)["repos"], ["core", "extra"])
 
 
 if __name__ == "__main__":

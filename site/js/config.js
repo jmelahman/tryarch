@@ -29,6 +29,12 @@ export const ARCH = "x86_64";
 // writes it at deploy time; it is never committed).
 export const INDEX_DIR = "index";
 
+// The AUR half of that index, under INDEX_DIR: the same shard layout,
+// written from the AUR's own package dump. It is kept apart because it
+// is an order of magnitude bigger than the binary repos and nothing
+// reads it until somebody asks for a package no repo ships.
+export const AUR_INDEX_DIR = "aur";
+
 // The Internet Archive's copy of the Arch Linux Archive: one item per
 // package name, holding every version that was ever in the repos.
 // /metadata answers with CORS `*`, and /cors serves the bytes with an
@@ -41,6 +47,16 @@ export const ARCHIVE_ITEM_PREFIX = "archlinux_pkg_";
 // spelled "plus", the tag is the full version with ":" spelled "-".
 export const PKGBUILD_URL =
   "https://gitlab.archlinux.org/archlinux/packaging/packages";
+
+// GitHub's mirror of the AUR's git, one branch per pkgbase. This is
+// the only copy of an AUR recipe a browser can read: aur.archlinux.org
+// serves the same files and sends no CORS header at all. A recipe is
+// `${AUR_RAW_URL}/${base}/.SRCINFO` or `${AUR_RAW_URL}/${base}/PKGBUILD`.
+export const AUR_RAW_URL = "https://raw.githubusercontent.com/archlinux/aur";
+
+// The human page for a package, `${AUR_PAGE_URL}/${name}`: votes, the
+// comments, and whoever flagged it out of date.
+export const AUR_PAGE_URL = "https://aur.archlinux.org/packages";
 
 // How many name matches the search list shows at once, and how many
 // completions the spec box's dropdown offers.

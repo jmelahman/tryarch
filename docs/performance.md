@@ -228,3 +228,39 @@ if a guest does not reach a shell. It needs a real browser and the
 network, so CI does not run it; run it by hand before pushing anything
 that touches the guest or the boot path. Two hangs shipped while every
 other check was green, and it is the only one that can see them.
+
+## Building in the guest
+
+Measured while making makepkg run in the guest (docs/design.md,
+"Building a recipe in the guest"), on the same machine as the rest of
+this file.
+
+|                                      |         |
+| ------------------------------------ | ------- |
+| fork, in the guest                   | ~26 ms  |
+| exec                                 | ~60 ms  |
+| bash process substitution            | ~255 ms |
+| makepkg's forks, one `any` package   | ~859    |
+| of which the lint pass               | ~800    |
+| forks with `MAKEPKG_LINT_PKGBUILD=0` | 52      |
+| build of that package, lint on       | 4m51s   |
+| build of that package, lint off      | 31.6 s  |
+
+The cost of a shell script under the emulator is its forks, not its
+work: a package with nothing to compile spends its minutes in makepkg's
+own subshells. Turning the lint pass off — the variable makepkg itself
+consults — was the whole optimisation, found by counting forks on the
+host with a BASHPID-tagged trace and finding that the profile of the
+guest's slow lines was empty: no single line took long, every line
+forked.
+
+What a build costs in packages, before it starts:
+
+|                                      | packages | download | unpacked |
+| ------------------------------------ | -------- | -------- | -------- |
+| makepkg alone (`-bin`, `any`)        | 111      | 118 MB   | 506 MB   |
+| with gcc, make, binutils and pkgconf | 128      | 192 MB   | 814 MB   |
+
+Both fit the memory budget above with the guest's 512 MiB, and the
+build tree is a tmpfs in that 512 MiB capped at 320 MB, so a build that
+needs more fails with "no space left" instead of taking the guest down.

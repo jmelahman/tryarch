@@ -19,8 +19,9 @@ test("readUrl reads packages, versions and repos", () => {
 });
 
 test("an empty query is an empty selection", () => {
-  assert.deepEqual(readUrl(""), { pkgs: [], repos: [], boot: false });
-  assert.deepEqual(readUrl("?"), { pkgs: [], repos: [], boot: false });
+  const empty = { pkgs: [], repos: [], aur: [], pkgbuilds: [], boot: false };
+  assert.deepEqual(readUrl(""), empty);
+  assert.deepEqual(readUrl("?"), empty);
 });
 
 test("boot is only on when it says 1", () => {
@@ -53,6 +54,31 @@ test("empty and blank entries are dropped", () => {
   assert.deepEqual(readUrl("?repo=%20").repos, []);
 });
 
+test("readUrl reads the AUR names and the pasted recipes", () => {
+  const state = readUrl(
+    "?pkg=jq&aur=yay-bin,paru&aur=downgrade&pkgbuild=https://example.invalid/PKGBUILD",
+  );
+  assert.deepEqual(state.aur, ["yay-bin", "paru", "downgrade"]);
+  assert.deepEqual(state.pkgbuilds, ["https://example.invalid/PKGBUILD"]);
+  // The two lanes are independent: an AUR name is not a package name.
+  assert.deepEqual(state.pkgs, [{ name: "jq", version: null }]);
+});
+
+test("blank AUR names and blank recipe URLs are dropped", () => {
+  const state = readUrl("?aur=,,yay,%20,&pkgbuild=%20&pkgbuild=%20a.sh%20");
+  assert.deepEqual(state.aur, ["yay"]);
+  assert.deepEqual(state.pkgbuilds, ["a.sh"]);
+});
+
+test("a PKGBUILD URL with a comma in it stays one recipe", () => {
+  // Unlike a name list, a URL is never split: GitHub's raw host puts
+  // commas in a path often enough to matter.
+  assert.deepEqual(
+    readUrl("?pkgbuild=https://example.invalid/a,b/PKGBUILD").pkgbuilds,
+    ["https://example.invalid/a,b/PKGBUILD"],
+  );
+});
+
 test("a repo URL with a comma in it stays one repo", () => {
   assert.deepEqual(readUrl("?repo=https://example.invalid/a,b/x.db").repos, [
     "https://example.invalid/a,b/x.db",
@@ -76,6 +102,33 @@ test("writeUrl builds a link that reads back", () => {
   assert.deepEqual(round.repos, state.repos);
 });
 
+test("writeUrl writes the AUR lane, and the link reads back", () => {
+  const state = {
+    pkgs: [{ name: "jq", version: null }],
+    repos: ["https://example.invalid/x.db"],
+    aur: ["yay-bin", "paru"],
+    pkgbuilds: ["https://example.invalid/a,b/PKGBUILD"],
+  };
+  const url = writeUrl(state);
+  // What is being installed comes before where it comes from.
+  assert.deepEqual(
+    [...new URLSearchParams(url.slice(url.indexOf("?"))).keys()],
+    ["pkg", "aur", "aur", "pkgbuild", "repo"],
+  );
+
+  const round = readUrl(url.slice(url.indexOf("?")));
+  assert.deepEqual(round.pkgs, state.pkgs);
+  assert.deepEqual(round.repos, state.repos);
+  assert.deepEqual(round.aur, state.aur);
+  assert.deepEqual(round.pkgbuilds, state.pkgbuilds);
+  assert.equal(round.boot, false);
+});
+
+test("boot is written last", () => {
+  const url = writeUrl({ aur: ["yay"] }, { boot: true });
+  assert.equal(url.endsWith("?aur=yay&boot=1"), true, url);
+});
+
 test("writeUrl adds boot only when asked", () => {
   assert.equal(writeUrl({ pkgs: [] }, { boot: true }).includes("boot=1"), true);
   assert.equal(writeUrl({ pkgs: [] }).includes("boot"), false);
@@ -84,6 +137,7 @@ test("writeUrl adds boot only when asked", () => {
 test("an empty selection is the bare path", () => {
   assert.equal(writeUrl({}), "/");
   assert.equal(writeUrl({ pkgs: [], repos: [] }), "/");
+  assert.equal(writeUrl({ aur: [], pkgbuilds: [] }), "/");
 });
 
 test("writeUrl keeps the page's own path", () => {

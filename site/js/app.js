@@ -1,12 +1,24 @@
 // Page wiring: choose Arch packages out of the site's index — by
-// search, by version spec, or from an extra repository — walk the union
-// of their dependency closures live from the mirrors and archive.org,
-// then boot. qemu-wasm runs an x86_64 guest in the tab, the packages
-// ride in over virtio-9p, and the serial console lands in the terminal.
-// docs/design.md holds the architecture.
+// search, by version spec, or from an extra repository — or a recipe to
+// build from the AUR or a PKGBUILD, walk the union of their dependency
+// closures live from the mirrors and archive.org, then boot. qemu-wasm
+// runs an x86_64 guest in the tab, the packages ride in over virtio-9p,
+// the recipes are built by makepkg once the guest is at its prompt, and
+// the serial console lands in the terminal. docs/design.md holds the
+// architecture.
 
 import { walkClosure } from "./closure.js";
 import { startVM } from "./boot.js";
+import { searchAur } from "./aur.js";
+import { buildInGuest } from "./build.js";
+import {
+  gatherSources,
+  recipeFromAur,
+  recipeFromFiles,
+  recipeFromUrl,
+  recipeWants,
+  supply,
+} from "./recipes.js";
 import { fetchWithProgress, warmHttpCache } from "./net.js";
 import { ProgressPanel } from "./progress.js";
 import { PackagePicker, repoClass } from "./search.js";
@@ -25,8 +37,7 @@ import {
   QEMU_WORKER,
   SNAPSHOT_URL,
 } from "./config.js";
-import { asset, assets, manifest } from "./assets.js";
-import { buildReport } from "./report.js";
+import { asset, assets } from "./assets.js";
 import { log, onLog } from "./log.js";
 
 const specsForm = document.getElementById("specs-form");
@@ -34,6 +45,10 @@ const specsInput = document.getElementById("specs-input");
 const specsResults = document.getElementById("specs-results");
 const reposInput = document.getElementById("repos-input");
 const reposStatus = document.getElementById("repos-status");
+const buildStatus = document.getElementById("build-status");
+const pkgbuildForm = document.getElementById("pkgbuild-form");
+const pkgbuildInput = document.getElementById("pkgbuild-input");
+const pkgbuildFiles = document.getElementById("pkgbuild-files");
 const selectionElement = document.getElementById("selection");
 const status = document.getElementById("status");
 const result = document.getElementById("result");
@@ -67,6 +82,23 @@ function deselect(name) {
   render();
 }
 
+// The recipes to build in the guest, by key (recipes.js): what the
+// Build lane picked, with its sources gathered as far as the page
+// could gather them. They sit in the selection beside the packages.
+const recipes = new Map();
+
+function selectRecipe(item) {
+  recipes.set(item.key, item);
+  render();
+}
+
+function deselectRecipe(key) {
+  recipes.delete(key);
+  render();
+}
+
+const recipeItems = () => [...recipes.values()];
+
 // The extra repositories in effect: what the repos lane says, and what
 // the link carries. Each is a pacman db on a host that sends CORS
 // headers; its packages take precedence over the index.
@@ -80,6 +112,12 @@ function urlState() {
       version: pinned ? build.version : null,
     })),
     repos: extraRepos,
+    aur: recipeItems()
+      .filter((item) => item.kind === "aur")
+      .map((item) => item.id),
+    pkgbuilds: recipeItems()
+      .filter((item) => item.kind === "url")
+      .map((item) => item.id),
   };
 }
 
@@ -158,14 +196,109 @@ function selectionRow({ build, pinned }) {
   return row;
 }
 
+// Files the reader dropped on an input, by name.
+async function readFiles(list) {
+  const files = new Map();
+  for (const file of list) {
+    files.set(file.name, new Uint8Array(await file.arrayBuffer()));
+  }
+  return files;
+}
+
+// A recipe's row: the base and the version the recipe says, a chip for
+// where it came from, the PKGBUILD, and under them one line per source
+// — its size when the page has it, otherwise why not and where to go
+// and get it — with a file input for the ones still missing.
+function recipeRow(item) {
+  const chip = item.built ? "built" : item.kind === "aur" ? "aur" : "pkgbuild";
+  const row = el(
+    "div",
+    { className: "pick recipe" },
+    el("span", { className: "pkg" }, item.base),
+    el("span", { className: "version-text" }, item.recipe.version),
+    el("span", { className: repoClass(chip) }, chip),
+  );
+  if (item.page !== null) {
+    row.append(
+      el("a", {
+        className: "pkgbuild",
+        href: item.page,
+        target: "_blank",
+        rel: "noopener",
+        textContent: "PKGBUILD",
+      }),
+    );
+  }
+  row.append(
+    el(
+      "span",
+      { className: "needs" },
+      item.profile === "compile" ? "builds with gcc" : "builds with makepkg",
+    ),
+    el("button", {
+      type: "button",
+      className: "remove",
+      textContent: "×",
+      onclick: () => deselectRecipe(item.key),
+    }),
+  );
+
+  if (item.rows.length > 0) {
+    const sources = el("ul", { className: "sources" });
+    for (const source of item.rows) {
+      const line = el("li", { className: source.status }, source.filename, " ");
+      if (source.status === "ready") {
+        line.append(
+          el("span", { className: "muted" }, humanBytes(source.size)),
+        );
+      } else {
+        line.append(
+          el("span", { className: "reason" }, source.reason ?? source.status),
+        );
+        if (source.url !== null) {
+          line.append(
+            " ",
+            el("a", {
+              href: source.url,
+              target: "_blank",
+              rel: "noopener",
+              textContent: "open",
+            }),
+          );
+        }
+      }
+      sources.append(line);
+    }
+    row.append(sources);
+  }
+
+  if (!item.ready) {
+    const files = el("input", { type: "file", multiple: true });
+    files.addEventListener("change", async () => {
+      await supply(item, await readFiles(files.files));
+      render();
+    });
+    row.append(el("label", { className: "supply" }, "supply the files", files));
+  }
+
+  row.dataset.key = item.key;
+  row.title = `${item.base} ${item.recipe.version}, built in the guest`;
+  return row;
+}
+
 // The rows, the status line, and the address bar all describe the same
 // selection, so they are redrawn together.
 function render() {
   const entries = [...selection.values()];
-  selectionElement.replaceChildren(...entries.map(selectionRow));
+  const items = recipeItems();
+  selectionElement.replaceChildren(
+    ...entries.map(selectionRow),
+    ...items.map(recipeRow),
+  );
 
-  bootButton.disabled = entries.length === 0;
-  status.textContent = entries.length === 0 ? "nothing selected yet" : "";
+  const empty = entries.length === 0 && items.length === 0;
+  bootButton.disabled = empty;
+  status.textContent = empty ? "nothing selected yet" : "";
 
   history.replaceState(null, "", writeUrl(urlState()));
 }
@@ -176,7 +309,7 @@ onLog((lines) => {
   debugLog.scrollTop = debugLog.scrollHeight;
 });
 
-// ---------- the three lanes ----------
+// ---------- the four lanes ----------
 
 // Picking a name takes its newest build, which is what the index has.
 async function selectName(name) {
@@ -260,6 +393,56 @@ reposInput.addEventListener("change", () => {
   applyRepos(urls);
 });
 
+// ---------- the build lane ----------
+
+// A recipe is read and its sources gathered the moment it is picked,
+// so the row can say what is still missing while the reader is
+// choosing rather than after a boot.
+async function addRecipe(load, what) {
+  buildStatus.textContent = `reading ${what}…`;
+  let item;
+  try {
+    item = await load();
+  } catch (err) {
+    buildStatus.textContent = `${what}: ${err.message}`;
+    log(`recipe ${what}: ${err.message}`);
+    return null;
+  }
+  selectRecipe(item);
+
+  buildStatus.textContent = `gathering the sources of ${item.base}…`;
+  await gatherSources(item);
+  buildStatus.textContent = item.ready
+    ? `${item.base} ${item.recipe.version}: everything is here`
+    : `${item.base}: ${item.missing.length} of its files still to supply`;
+  render();
+  return item;
+}
+
+const addAurRecipe = (name) => addRecipe(() => recipeFromAur(name), name);
+const addUrlRecipe = (url) => addRecipe(() => recipeFromUrl(url), url);
+
+new PackagePicker({
+  input: document.getElementById("aur-search"),
+  results: document.getElementById("aur-results"),
+  search: searchAur,
+  onPick: (hit) => addAurRecipe(hit.name),
+});
+
+pkgbuildForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const url = pkgbuildInput.value.trim();
+  if (url !== "") {
+    addUrlRecipe(url);
+  }
+});
+
+pkgbuildFiles.addEventListener("change", async () => {
+  const files = await readFiles(pkgbuildFiles.files);
+  await addRecipe(() => recipeFromFiles(files), "the dropped files");
+  pkgbuildFiles.value = "";
+});
+
 // The lane tabs: buttons, one panel visible at a time.
 const laneNav = document.getElementById("lanes");
 laneNav.addEventListener("click", (event) => {
@@ -272,7 +455,7 @@ laneNav.addEventListener("click", (event) => {
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
   }
-  for (const lane of ["search", "specs", "repos"]) {
+  for (const lane of ["search", "specs", "repos", "build"]) {
     document.getElementById(`lane-${lane}`).hidden = lane !== tab.dataset.lane;
   }
 });
@@ -280,8 +463,8 @@ laneNav.addEventListener("click", (event) => {
 // ---------- the boot ----------
 
 // What the guest has, by name: the build, and what its package weighed.
-// A later addition only fetches what is new, and the report and the
-// table read from here.
+// A later addition only fetches what is new, and the table reads from
+// here.
 let mounted = new Map();
 
 function recordPackage(pkg) {
@@ -323,17 +506,24 @@ function renderClosure() {
         {},
         el("span", { className: repoClass(build.repo) }, build.repo),
       ),
-      el("td", { className: "size" }, humanBytes(compressed ?? 0)),
+      el(
+        "td",
+        { className: "size" },
+        // A package the guest built came over no network.
+        compressed === null ? "built here" : humanBytes(compressed),
+      ),
       el("td", { className: "size" }, humanBytes(unpacked)),
       el(
         "td",
         {},
-        el("a", {
-          href: build.pkgbuild,
-          target: "_blank",
-          rel: "noopener",
-          textContent: "PKGBUILD",
-        }),
+        build.pkgbuild === null
+          ? ""
+          : el("a", {
+              href: build.pkgbuild,
+              target: "_blank",
+              rel: "noopener",
+              textContent: "PKGBUILD",
+            }),
       ),
     );
   }
@@ -368,8 +558,6 @@ function reportOutcome(vm, roots, problems) {
 // new selection and asks for it to start straight away.
 let vmStarted = false;
 let vm = null;
-// How the guest started, for the report.
-let bootMode = "not started";
 
 function reboot() {
   location.href = writeUrl(urlState(), { boot: true });
@@ -377,6 +565,66 @@ function reboot() {
 }
 
 const selectedBuilds = () => [...selection.values()].map((e) => e.build);
+
+// The recipes with everything in hand, which are the ones worth
+// fetching a toolchain for.
+const buildableItems = () =>
+  recipeItems().filter((item) => item.ready && !item.built);
+
+// Build each recipe in the guest, one after another, once it is at its
+// prompt. The console stays live: makepkg's output is worth watching,
+// and Ctrl-C there cancels a build the reader has given up on — the
+// driver reports the interruption like any other failure. Builds are
+// numbered across the page's life, so the markers the guest prints
+// never repeat.
+let buildCount = 0;
+
+async function buildRecipes(items, panel) {
+  const roots = [];
+  const problems = [];
+  for (const item of items) {
+    if (item.built) {
+      continue;
+    }
+    const row = panel.row(`building ${item.base}`);
+    if (!item.ready) {
+      const names = item.missing.map((one) => one.filename).join(", ");
+      row.fail(`not built: missing ${names}`);
+      problems.push(
+        `${item.base} was not built: supply ${names} and add it to the running VM`,
+      );
+      continue;
+    }
+
+    buildCount += 1;
+    row.note("makepkg is running in the guest…");
+    status.textContent = `building ${item.base} in the guest — Ctrl-C in the console cancels it`;
+    try {
+      const packages = await buildInGuest(vm, item, buildCount);
+      for (const pkg of packages) {
+        vm.add(pkg);
+        recordPackage(pkg);
+        roots.push(pkg.build);
+      }
+      item.built = true;
+      row.done(
+        packages
+          .map((pkg) => `${pkg.build.name} ${pkg.build.version}`)
+          .join(", "),
+      );
+      log(
+        `built ${item.base}: ${packages.map((pkg) => pkg.build.filename).join(", ")}`,
+      );
+    } catch (err) {
+      row.fail(err.message);
+      problems.push(`${item.base} failed to build: ${err.message}`);
+      log(`build of ${item.base} failed: ${err.message}`);
+    }
+    renderClosure();
+  }
+  render();
+  return { roots, problems };
+}
 
 // The boot flow. The engine, the guest image, the snapshot and the
 // packages download in parallel under one progress panel; the engine
@@ -460,7 +708,6 @@ async function boot() {
       snapshotPromise,
     ]).then(([, guestFiles, machine, snapshot]) => {
       resuming = snapshot !== null;
-      bootMode = resuming ? "resumed from the snapshot" : "cold booted";
       log(
         snapshot === null
           ? "no snapshot; the guest will cold boot"
@@ -480,8 +727,12 @@ async function boot() {
     // is dropped from the page's hands right after. Nothing here ever
     // holds more than the few packages in flight.
     const roots = selectedBuilds();
+    const items = recipeItems();
     let discovered = 0;
     const { builds, problems } = await walkClosure(roots, {
+      // What the recipes need is fetched with the packages: their
+      // dependencies, and makepkg and the toolchain.
+      wants: buildableItems().map(recipeWants),
       onDiscover: () => {
         discovered += 1;
       },
@@ -497,6 +748,7 @@ async function boot() {
     packagesRow.done(`${builds.length} packages`);
     log(
       `closure: ${builds.length} packages from ${roots.length} roots` +
+        (items.length > 0 ? ` and ${items.length} recipes` : "") +
         (problems.length > 0 ? `, ${problems.length} problems` : ""),
     );
 
@@ -522,6 +774,17 @@ async function boot() {
     log("guest at its prompt");
     vmRow.done("running");
     consoleVeil.hidden = true;
+
+    if (items.length > 0) {
+      bootButton.disabled = true;
+      const built = await buildRecipes(items, panel);
+      reportOutcome(
+        vm,
+        [...roots, ...built.roots],
+        [...problems, ...built.problems],
+      );
+      bootButton.disabled = false;
+    }
   } catch (err) {
     log(`boot failed: ${err.message}`);
     vmRow.fail(String(err));
@@ -558,11 +821,13 @@ async function addToRunningVM() {
 
   try {
     const roots = selectedBuilds();
+    const items = recipeItems().filter((item) => !item.built);
     const known = new Map(
       [...mounted.values()].map(({ build }) => [build.name, build]),
     );
     const { builds, problems } = await walkClosure(roots, {
       known,
+      wants: buildableItems().map(recipeWants),
       onTotal: (n) => row.setTotal(n),
       onBytes: (n) => row.add(n),
       onPackage: async (pkg) => {
@@ -575,7 +840,12 @@ async function addToRunningVM() {
     } else {
       row.done(`${builds.length} packages added`);
     }
-    reportOutcome(vm, roots, problems);
+    const built = await buildRecipes(items, panel);
+    reportOutcome(
+      vm,
+      [...roots, ...built.roots],
+      [...problems, ...built.problems],
+    );
     renderClosure();
   } catch (err) {
     row.fail(String(err));
@@ -584,35 +854,13 @@ async function addToRunningVM() {
   }
 }
 
-// ---------- the report ----------
-
-// Built when pressed, from what the page already has (report.js). The
-// clipboard needs a secure context and a user gesture; when it is
-// refused, the report replaces the log so it can be selected by hand.
-const reportStatus = document.getElementById("report-status");
-document.getElementById("copy-report").addEventListener("click", async () => {
-  const report = buildReport({
-    manifest: await manifest(),
-    packages: [...mounted.values()],
-    terminal: vm?.terminal ?? null,
-    transcript: window.tryarch?.transcript() ?? "",
-    boot: bootMode,
-  });
-  try {
-    await navigator.clipboard.writeText(report);
-    reportStatus.textContent = "copied";
-  } catch {
-    debugLog.textContent = report;
-    reportStatus.textContent = "select it below and copy";
-  }
-});
-
 // ---------- restoring a shared link ----------
 
 // A package named without a version means "whatever the repos have
 // now", which is what makes ?pkg=jq a durable link; one with a version
-// is looked up across the repos and the archive.
-async function restore({ pkgs, repos }) {
+// is looked up across the repos and the archive. A recipe is read
+// again from wherever it lives, which is the same durability.
+async function restore({ pkgs, repos, aur, pkgbuilds }) {
   if (repos.length > 0) {
     reposInput.value = repos.join("\n");
     await applyRepos(repos);
@@ -629,6 +877,13 @@ async function restore({ pkgs, repos }) {
       continue;
     }
     select(hit, { pinned: true });
+  }
+
+  for (const name of aur) {
+    await addAurRecipe(name);
+  }
+  for (const url of pkgbuilds) {
+    await addUrlRecipe(url);
   }
 }
 
@@ -686,9 +941,14 @@ if (!initial.boot) {
   }
 }
 render();
-if (initial.pkgs.length > 0 || initial.repos.length > 0) {
+if (
+  initial.pkgs.length > 0 ||
+  initial.repos.length > 0 ||
+  initial.aur.length > 0 ||
+  initial.pkgbuilds.length > 0
+) {
   restore(initial).then(() => {
-    if (initial.boot && selection.size > 0) {
+    if (initial.boot && (selection.size > 0 || recipes.size > 0)) {
       boot();
     }
   });

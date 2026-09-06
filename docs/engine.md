@@ -196,6 +196,33 @@ and these numbers do not support it. Move the site to Cloudflare Pages
 (build with `tools/build-site.py`, publish the output directory with the
 index beside it) for control over headers and caching, not for speed.
 
+## What the next engine build should fix
+
+Building a package in the guest (docs/design.md, "Building a recipe in
+the guest") found three more places the 9p server and emscripten's
+filesystem disagree. tryarch works around all three by never writing to
+the share from the guest except into a file the page created, but each
+is a small patch to the engine, and the workarounds could go once they
+land:
+
+- **ENOTSUP is not translated.** `patches/0001-9pfs-translate-emscripten-errnos-to-linux.patch`
+  maps the errnos the server returns to Linux numbers, and emscripten's
+  ENOTSUP (138) is not in the table, so the guest sees "Unknown error
+  138" where it should see EOPNOTSUPP (95). One more row.
+- **`fchmodat_nofollow` goes through `/proc/self/fd`.** QEMU's Linux
+  implementation chmods a freshly created file as
+  `chmod("/proc/self/fd/N")`, and emscripten's filesystem has no
+  `/proc`, so every create, mkdir and chmod from the guest fails with
+  EPERM. Under emscripten the call can be a plain `fchmod(fd)`: there
+  are no symlinks to refuse to follow in a filesystem the page wrote.
+- **`symlinkat` throws on the main thread.** The JS glue emitted for
+  `__syscall_symlinkat` in the built engine calls a string helper it
+  never imported, so the first symlink a guest makes on the share throws
+  a TypeError outside any handler and the VM stops for good. It is an
+  emscripten library-linking slip rather than a QEMU bug; the fix is in
+  the build's JS library, and a guest must never make a symlink on the
+  share until it is in.
+
 ## Why the guest image is committed
 
 The engine and the snapshot are release assets, fetched by hash. The

@@ -83,6 +83,14 @@
             <a href="https://archive.org/details/archlinuxarchive">Arch Linux Archive</a>, one
             item per package name, read through archive.org's CORS endpoint.
           </p>
+          <p>
+            A recipe's sources are gathered by the page, since the machine has no network, and
+            only a host that allows cross-origin reads can be read: raw.githubusercontent.com,
+            crates.io and the npm registry do; GitHub release assets, GitLab, PyPI, gnu.org,
+            kernel.org and SourceForge do not. A file the page cannot fetch is a row with a link
+            and a place to drop the file. AUR recipes are read from GitHub's mirror of the AUR,
+            because aur.archlinux.org sends no CORS headers either.
+          </p>
           <p class="note note-alert">
             That mirror stops around <b>October 2024</b>. A version that was still current then,
             or older, is there; a version that came and went after that date is not, and
@@ -121,9 +129,11 @@
               anything added later keeps its files under <code>/share/etc</code>.
             </li>
             <li>
-              AUR packages are recipes, not binaries — there is nothing to fetch, so they cannot
-              be booted. <a href="https://jamison.lahman.dev/pkglint/">pkglint</a> grades those
-              instead.
+              AUR packages and PKGBUILDs are built in the machine by makepkg, at emulator speed,
+              with makepkg alone or with gcc — no base-devel, no VCS sources, no test suite. A
+              <code>-bin</code> or <code>any</code> package takes under a minute, a C program many.
+              <a href="https://jamison.lahman.dev/pkglint/">pkglint</a> grades the recipes
+              themselves.
             </li>
             <li>multilib is skipped; only <code>x86_64</code> and <code>any</code> packages.</li>
             <li>

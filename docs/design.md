@@ -100,6 +100,7 @@ of:
 index/names.json         every name and a truncated description
 index/pkgs/<xx>.json     the current build of each package
 index/provides/<xx>.json which packages provide a virtual name
+index/aur/...            the same three files, for the AUR
 ```
 
 A shard `xx` is two hex digits of `FNV-1a(name) & 0xff` — 256 shards,
@@ -111,6 +112,15 @@ and installed size, SHA-256, build date, dependencies, provides,
 resolve a package without opening the package. Output is deterministic —
 sorted keys, no whitespace — so an unchanged repository produces an
 unchanged file.
+
+The AUR tree is built the same way from a different source: the metadata
+dump aur.archlinux.org publishes, ~119k packages in one gzipped JSON
+array, resharded with what a source build needs — make and check
+dependencies, popularity, votes, out-of-date — in place of what only a
+binary repo has. It has to be copied at deploy time because the AUR
+sends no CORS headers, so the page cannot query it at runtime at all:
+what the dump held when the site was built is everything the page knows
+about the AUR.
 
 The index is never committed. It is a snapshot of what the mirrors hold
 right now, and mirrors delete superseded files within hours of a sync,
@@ -184,6 +194,8 @@ what is on screen:
 | `pkg=jq@1.7.1-2`      | one exact version, archive included   |
 | `pkg=git,python`      | comma-separated, and `pkg` may repeat |
 | `repo=<url to a .db>` | an extra pacman repository            |
+| `aur=<name>`          | an AUR package, built in the guest    |
+| `pkgbuild=<url>`      | a PKGBUILD by URL, built in the guest |
 | `boot=1`              | start without a click                 |
 
 `repo` is what makes a package that is in no Arch repository bootable:
@@ -193,6 +205,12 @@ extra. Nothing about it is stored — the link is the only place the list
 lives. `site/examples/repo` is one such repository, three files built by
 `tools/make-example-repo.sh`, served from this site because GitHub Pages
 allows cross-origin reads on everything it serves.
+
+`aur` and `pkgbuild` are read again from where they live — the AUR
+mirror rewrites a package's branch in place, a PKGBUILD by URL is edited
+in place — so the link means the recipe as it is now, the way a bare
+`pkg` means the version the repos have now. A recipe dropped on the page
+as files has no URL to carry and is not in the link at all.
 
 `boot=1` works in any link. The page never adds it to the address bar
 itself, though: a link copied from there lands on the selection with the
@@ -252,6 +270,79 @@ database, and running one here would be neither safe nor meaningful.
 And **a package added to a running VM does not get its `/etc` merged**:
 `/etc` was copied once, at boot, so a later package's configuration
 stays under `/share/etc` where the reader can find it.
+
+## Building a recipe in the guest
+
+An AUR package is a PKGBUILD, not a package, and a PKGBUILD needs
+makepkg, which needs an Arch root. The guest is one. So a recipe is
+built where the packages already are: the page fetches makepkg's own
+closure beside the selection (pacman, bash, coreutils and the rest,
+`BUILD_PROFILES` in `site/js/buildenv.js`; gcc, make, binutils and
+pkgconf on top when the PKGBUILD has a `build()` step), boots, and once
+the guest is at its prompt types the driver's name into the console.
+The console stays live: makepkg's output is worth watching, and Ctrl-C
+there gives up on a build the way it would anywhere.
+
+**The page gathers the sources.** The guest has no network, so
+`source=()` is the page's job (`site/js/recipe.js`), and the same rule
+that picks the mirrors applies: only a host that sends CORS headers can
+be read. raw.githubusercontent.com, crates.io and the npm registry do;
+GitHub release assets, GitLab, PyPI, gnu.org, kernel.org and SourceForge
+do not, which is most of what `-bin` packages point at. A file the page
+cannot fetch is a row with the URL and a file input, and a file dropped
+there wins over anything fetched. Checksums from the recipe are verified
+by the page, `SKIP` included in the sense that it checks nothing. VCS
+sources are refused: there is no git in the tab. An AUR recipe is read
+from GitHub's mirror of the AUR (`archlinux/aur`, one branch per
+pkgbase), because aur.archlinux.org sends no CORS headers either; the
+`.SRCINFO` is what the page reads, since makepkg already expanded the
+bash, and the PKGBUILD is what the guest runs.
+
+**Nothing is built on the share.** makepkg creates files, chmods them
+and makes symlinks, and the engine gets all three wrong on a 9p export
+of emscripten's filesystem (below). So the build runs in guest RAM,
+under `/tmp/tryarch` on a tmpfs capped at 320 MB — a build that
+outgrows it fails with "no space left" rather than taking the guest
+down — and the only thing that comes back is the finished archive.
+Writing into a file that already exists is the one write the share
+takes, so the page creates `out.tar` empty before it starts, the driver
+`bsdtar`s the `.pkg.tar` files into it and runs `sync`, and the page
+reads it out of the emscripten filesystem and unpacks each package with
+the code a download goes through. Packages are written uncompressed
+(`PKGEXT='.pkg.tar'`): the page unpacks them itself, and zstd under an
+emulator is time for nothing.
+
+**makepkg runs as root**, because root is the only user the guest has.
+makepkg refuses that outright, and wants fakeroot for the packaging
+step; neither means anything here — nothing keeps ownership on the
+share, and there is no second user to protect. The driver copies makepkg
+with its one `EUID == 0` test disabled and gives it a fakeroot that runs
+the command as the root it already is. `--nodeps` because there is no
+pacman database to ask, `--nocheck` because a test suite under an
+emulator is not the point, `--skippgpcheck` because there is no keyring;
+the checksum verification stays on.
+
+**The lint pass is skipped.** makepkg lints a PKGBUILD before building
+it, in a subshell per attribute — about 800 forks — and a fork costs
+about 26 ms under the emulator. The example package took 4m51s that way
+and 32 s without (`MAKEPKG_LINT_PKGBUILD=0`, the variable makepkg
+itself consults). The page has already parsed the recipe, which is most
+of what lint would say.
+
+**The guest reports by printing.** The driver prints `tryarch: build #n
+done` or `tryarch: build #n failed: <reason>` and the page watches the
+console transcript for either, both waiters armed before the command is
+typed. `n` counts builds within one page, so a marker belongs to
+exactly one build: a marker that could have come from an earlier build
+would match at once. Ctrl-C reaches the driver as SIGINT and its trap
+prints the failure marker, so the page's wait ends the same way.
+
+What comes out is a package with `repo: "built"`: it appears in the
+closure table as "built here", with no download and no PKGBUILD link
+unless the recipe came from somewhere linkable, and its programs are on
+the guest's PATH like any other. It is not cached — the next visit
+builds it again — and it can be built into a running VM as well as at
+boot.
 
 ## The guest, and why it still says trynix
 
@@ -406,10 +497,11 @@ are the emulator's.
 
 ## Where emscripten and the guest disagree
 
-Three bugs, all in the seam between emscripten's filesystem and a real
-Linux guest reading it over 9p. Each one is invisible until a package
-does something more than print a greeting, and each is worth knowing
-before changing this code.
+Six bugs, all in the seam between emscripten's filesystem and a real
+Linux guest using it over 9p: three met by reading packages, three more
+by building one. Each is invisible until a package does something more
+than print a greeting, and each is worth knowing before changing this
+code.
 
 **Symlinks.** `FS.readlink` resolves a link against its parent and
 returns an absolute path, while the stat beside it reports the
@@ -436,6 +528,22 @@ stderr away from the xterm-pty js-library linked into the build, and the
 console stays blank for the whole run — guest output included. QEMU's
 diagnostics arrive in the terminal instead.
 
+**Writes from the guest.** Creating a file or a directory on the share
+fails with EPERM: the 9p server chmods what it just created through
+`chmod("/proc/self/fd/N")`, a Linux idiom (`fchmodat_nofollow`) that
+emscripten's filesystem has no `/proc` for. Making a symlink is worse —
+the `symlinkat` glue in the built engine calls a helper it never
+imported, the TypeError lands on the main thread, and the VM stops for
+good, no error anywhere the guest could see. And an operation the
+filesystem does not support comes back as errno 138, ENOTSUP in
+emscripten's numbering, which the translation patch does not map, so
+the guest prints "Unknown error 138". Writing into a file that already
+exists is the one thing that works, since it goes through the truncate
+path and creates nothing; that is why a build hands its result back
+through a file the page made first, and why overlayfs over the share
+(tried under every option set) was abandoned. docs/engine.md says what
+the next engine build should fix.
+
 And one thing that is not a bug: busybox's `clear` sends only the
 erase-screen sequence, so the terminal's scrollback survives it. The
 `clear` from ncurses sends erase-scrollback too, and a guest with it on
@@ -452,9 +560,12 @@ decisions above rather than things left undone:
   boot does not get its `/etc` into the guest's `/etc`.
 - **core and extra, `x86_64` and `any` only.** multilib is skipped: it
   exists to run 32-bit binaries beside 64-bit ones, which is a use for a
-  desktop and not for a shell in a tab. The AUR cannot be booted at all
-  — it publishes recipes, not binaries, and building one would need the
-  whole toolchain in the guest.
+  desktop and not for a shell in a tab.
+- **A recipe builds with makepkg, or makepkg and gcc**, at emulator
+  speed, from sources the page can fetch or the reader supplies, and
+  never from a VCS. The rest of base-devel is a makedepends away when a
+  recipe names it, and every package of it is a download and a share of
+  the guest's memory; a build tree larger than 320 MB fails.
 - **History stops around October 2024**, and only for packages the
   Internet Archive happened to have collected.
 - **Five mirrors.** The list was scanned by hand and nothing keeps it
@@ -489,7 +600,8 @@ things that looked like they would and did not:
   index; `serve.py` serves a built tree; the rest are the engine tools
   (docs/engine.md).
 - `examples/` — the PKGBUILD behind the extra-repository example, built
-  into `site/examples/repo` by `tools/make-example-repo.sh`.
+  into `site/examples/repo` by `tools/make-example-repo.sh`, and read
+  straight from GitHub by the Build lane's example link.
 - `tests/` — the node and python suites, offline; run by CI along with
   `prettier --check`.
 - `docs/` — this file, docs/engine.md and docs/performance.md.

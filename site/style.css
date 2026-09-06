@@ -373,6 +373,17 @@ ul {
   color: var(--chalk);
   border-color: var(--accent);
 }
+/* A recipe, and the package the guest made from it: the same accent as a
+   pasted repo, since both are things no official repo vouches for. */
+.repo-aur {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.repo-built {
+  color: var(--ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
 
 /* ── notes ────────────────────────────────────────────────────────────── */
 .note {
@@ -444,6 +455,45 @@ textarea::placeholder {
   color: var(--dim);
 }
 
+/* The URL box under the AUR search: its own row, the button beside it. */
+#pkgbuild-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+  margin-top: 0.7rem;
+}
+#pkgbuild-form input {
+  flex: 1;
+  max-width: 34rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--panel);
+  color: var(--chalk);
+  font: 400 0.875rem/1.5 var(--mono);
+}
+#pkgbuild-form input::placeholder {
+  color: var(--dim);
+}
+/* A file input, worded: the browser's own button, in a sentence. */
+.file-pick {
+  display: block;
+  margin-top: 0.7rem;
+  color: var(--dim);
+  font-size: 0.875rem;
+}
+.file-pick input {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--chalk);
+  font: 400 0.8125rem/1.5 var(--mono);
+}
+#build-status {
+  margin-top: 0.7rem;
+  color: var(--dim);
+  font-size: 0.875rem;
+}
+
 /* The input takes the measure, the button rides beside it. */
 #specs-form {
   display: flex;
@@ -457,8 +507,7 @@ textarea::placeholder {
 
 /* Secondary controls: the label face, a hairline box, no fill. Only one
    button on this page starts a machine, and it is the only filled one. */
-#specs-form button,
-#copy-report {
+#specs-form button {
   border: 1px solid var(--rule);
   border-radius: 3px;
   background: var(--panel);
@@ -469,8 +518,7 @@ textarea::placeholder {
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
-#specs-form button:hover,
-#copy-report:hover {
+#specs-form button:hover {
   color: var(--chalk);
   border-color: var(--dim);
 }
@@ -618,6 +666,49 @@ a.pkgbuild {
 }
 a.pkgbuild:hover {
   color: var(--accent);
+}
+/* A recipe's row carries its sources under the name: one line each, with
+   what the page has and what it still needs. */
+.pick .version-text {
+  color: var(--dim);
+  font: 400 0.8125rem/1.4 var(--mono);
+}
+.pick .needs {
+  color: var(--dim);
+  font-size: 0.8125rem;
+}
+.pick .sources {
+  flex-basis: 100%;
+  margin: 0.1rem 0 0.2rem;
+  padding: 0;
+  list-style: none;
+  font: 400 0.8125rem/1.6 var(--mono);
+  color: var(--dim);
+}
+.pick .sources .ready {
+  color: var(--ok);
+}
+.pick .sources .missing {
+  color: var(--bad);
+}
+.pick .sources .unsupported {
+  color: var(--bad);
+}
+.pick .sources a {
+  color: inherit;
+}
+.pick .sources .reason {
+  font-family: var(--sans);
+}
+.pick .supply {
+  flex-basis: 100%;
+  color: var(--dim);
+  font-size: 0.8125rem;
+}
+.pick .supply input {
+  margin-left: 0.5rem;
+  color: var(--chalk);
+  font: 400 0.8125rem/1.5 var(--mono);
 }
 button.remove {
   margin-left: auto;
@@ -845,7 +936,7 @@ button.remove:hover {
   color: #0a0a0c;
 }
 
-/* ── the report ───────────────────────────────────────────────────────── */
+/* ── the log ──────────────────────────────────────────────────────────── */
 /* Closed until something goes wrong and the reader opens it, which <details>
    does with no script at all. */
 #debug > summary {
@@ -882,19 +973,6 @@ button.remove:hover {
   border-left: 2px solid var(--accent);
   padding: 0.15rem 0 0.15rem 1.1rem;
   margin-top: 1.1rem;
-}
-.debug-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 0.7rem;
-  margin: 0 0 0.9rem;
-  max-width: 44rem;
-  font-size: 0.875rem;
-  color: var(--dim);
-}
-#report-status {
-  color: var(--chalk);
 }
 #debug-log {
   max-height: 18rem;

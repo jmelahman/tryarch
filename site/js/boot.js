@@ -333,7 +333,61 @@ export async function startVM({
 
     // The programs a written package offers, by name.
     programsOf: (name) => share.programsOf(name),
+
+    // Building in the guest (build.js) is a conversation over the
+    // console: the page stages what a build needs on the share, types
+    // one command at the prompt, waits for the marker the driver
+    // prints, and reads back what the guest wrote. Everything the
+    // guest has printed is what the markers are matched against.
+    //
+    // Files are keyed by path under `dir`, which is itself under the
+    // share, as bytes or as text; a directory in a path is made on the
+    // way. Nothing here touches what a package wrote.
+    stage(dir, files) {
+      for (const [name, content] of files) {
+        const path = `${SHARE_DIR}/${dir}/${name}`;
+        ensureDir(mod.FS, path.slice(0, path.lastIndexOf("/")));
+        mod.FS.writeFile(path, content);
+      }
+    },
+
+    // The bytes of a file under the share, as the guest left them.
+    readFile: (path) => mod.FS.readFile(`${SHARE_DIR}/${path}`),
+
+    // Drop a staged directory and everything in it.
+    unstage(dir) {
+      removeTree(mod.FS, `${SHARE_DIR}/${dir}`);
+    },
+
+    // Keystrokes at the prompt: a line, and the newline that runs it.
+    type(line) {
+      send(master, `${line}\n`);
+    },
+
+    waitFor: (marker, options) => console_.waitFor(marker, options),
+    transcript: () => console_.transcript(),
   };
+}
+
+// rm -rf on the emscripten filesystem; a path that is not there is
+// nothing to do.
+function removeTree(FS, path) {
+  let stat;
+  try {
+    stat = FS.stat(path);
+  } catch {
+    return;
+  }
+  if (FS.isDir(stat.mode)) {
+    for (const name of FS.readdir(path)) {
+      if (name !== "." && name !== "..") {
+        removeTree(FS, `${path}/${name}`);
+      }
+    }
+    FS.rmdir(path);
+  } else {
+    FS.unlink(path);
+  }
 }
 
 // A cold boot announces itself, takes one newline, and mounts.
@@ -432,24 +486,28 @@ function watchConsole(master) {
       });
     },
 
-    // Resolves when the marker has been seen, and gives up quietly
-    // after HANDSHAKE_TIMEOUT_MS: a guest this far off script has a
+    // Resolves true when the marker has been seen, and false after
+    // `timeoutMs`, quietly: a guest this far off script at boot has a
     // worse problem than a missing newline, and unveiling its console
-    // is more useful than waiting forever.
-    waitFor(marker) {
+    // is more useful than waiting forever. A build waits as long as it
+    // takes, with Infinity.
+    waitFor(marker, { timeoutMs = HANDSHAKE_TIMEOUT_MS } = {}) {
       if (transcript.includes(marker)) {
-        return Promise.resolve();
+        return Promise.resolve(true);
       }
       return new Promise((resolve) => {
-        const waiter = { marker, resolve };
+        const waiter = { marker, resolve: () => resolve(true) };
         waiters.push(waiter);
+        if (timeoutMs === Infinity) {
+          return;
+        }
         setTimeout(() => {
           const at = waiters.indexOf(waiter);
           if (at !== -1) {
             waiters.splice(at, 1);
           }
-          resolve();
-        }, HANDSHAKE_TIMEOUT_MS);
+          resolve(false);
+        }, timeoutMs);
       });
     },
   };

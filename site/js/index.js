@@ -61,7 +61,10 @@ const BACKOFF_MS = 300;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function fetchJson(path) {
+// One file out of the index, relative to INDEX_DIR. Exported because
+// the AUR index (aur.js) lives under the same directory and wants the
+// same retries, the same 404 rule and the same injected fetcher.
+export async function indexJson(path) {
   for (let attempt = 1; ; attempt += 1) {
     try {
       const res = await fetcher(`${INDEX_DIR}/${path}`, { cache: "no-cache" });
@@ -91,7 +94,7 @@ let indexPromise;
 let namesPromise;
 
 function loadIndex() {
-  indexPromise ??= fetchJson("names.json")
+  indexPromise ??= indexJson("names.json")
     .then((json) => json ?? EMPTY_INDEX)
     .catch(() => EMPTY_INDEX);
   return indexPromise;
@@ -119,12 +122,14 @@ const shards = new Map();
 
 // A shard that could not be read is not remembered as empty: the
 // failure is the caller's to report, and the next lookup tries again.
-function shard(dir, name) {
+// `dir` is a path under INDEX_DIR, so "pkgs" and "aur/pkgs" share this
+// memo without sharing a namespace.
+export function indexShard(dir, name) {
   const key = `${dir}/${shardOf(name)}`;
   if (!shards.has(key)) {
     shards.set(
       key,
-      fetchJson(`${key}.json`)
+      indexJson(`${key}.json`)
         .then((json) => json ?? {})
         .catch((err) => {
           shards.delete(key);
@@ -265,7 +270,7 @@ export async function current(name) {
     }
   }
 
-  const entry = (await shard("pkgs", name))[name];
+  const entry = (await indexShard("pkgs", name))[name];
   if (entry === undefined) {
     return null;
   }
@@ -292,7 +297,7 @@ export async function providersOf(name) {
     }
   }
 
-  for (const pkg of (await shard("provides", name))[name] ?? []) {
+  for (const pkg of (await indexShard("provides", name))[name] ?? []) {
     if (!found.includes(pkg)) {
       found.push(pkg);
     }
@@ -303,7 +308,9 @@ export async function providersOf(name) {
 
 // How a search hit is ranked: exact name, then a name that starts with
 // the query, then one that contains it, then a description that does.
-function rankOf(name, desc, query) {
+// Exported so the AUR lane ranks its own names the same way rather
+// than drifting into a second answer for the same query.
+export function rankOf(name, desc, query) {
   if (name === query) {
     return 0;
   }
@@ -352,7 +359,7 @@ export async function searchNames(query, limit = SEARCH_LIMIT) {
     hits.slice(0, limit).map(async ({ name, desc, repo }) => ({
       name,
       desc,
-      repo: repo ?? (await shard("pkgs", name))[name]?.r ?? "",
+      repo: repo ?? (await indexShard("pkgs", name))[name]?.r ?? "",
     })),
   );
 }
