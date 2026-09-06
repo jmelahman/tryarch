@@ -970,6 +970,17 @@ td.file {
 .prose li + li {
   margin-top: 0.4rem;
 }
+/* Four blocks of prose need a rule between them; the widgets on the front
+   page separate themselves and do not. It is the line the narrow layout
+   already draws above every section name, promoted to every width and run
+   across both columns, with the same air on each side of it. */
+.prose .row {
+  margin-bottom: 2.25rem;
+}
+.prose .row + .row {
+  border-top: 1px solid var(--rule);
+  padding-top: 2.25rem;
+}
 /* The way back, set in the content column like everything else. */
 .back {
   margin: 0;
@@ -1041,6 +1052,12 @@ footer #index-info:empty {
   #result,
   .back {
     margin-left: 0;
+  }
+  /* The prose row draws its own rule at every width, so the name above it
+     must not draw a second one. */
+  .prose .row + .row > .tag {
+    border-top: 0;
+    padding-top: 0;
   }
 }
 
