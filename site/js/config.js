@@ -1,36 +1,61 @@
 // Site-wide constants.
 
-// The binary cache the closure walk and NAR fetches read from. The cache
-// answers browser fetches directly: it serves
-// `access-control-allow-origin: *` (verified 2026-09-04 on nix-cache-info
-// and narinfo responses alike), so no proxy or server sits anywhere in
-// the pipeline.
-export const CACHE_URL = "https://cache.nixos.org";
+// The Arch mirrors the page fetches repo databases and packages from.
+//
+// A browser can only read a mirror that answers cross-origin, and
+// almost none do: of the 396 https mirrors on archlinux.org, these five
+// send `access-control-allow-origin: *` on both the .db files and the
+// package files (verified 2026-09-05, Range requests included). They are
+// tried in this order, so a mirror that dropped a file costs one 404 and
+// not a boot.
+export const MIRRORS = [
+  "https://mirror.lcarilla.de/archlinux/",
+  "https://archlinux.mailtunnel.eu/",
+  "https://repo.c48.uk/arch/",
+  "https://mirror.iusearchbtw.nl/",
+  "https://yonderly.org/mirrors/archlinux/",
+];
 
-// The nixpkgs-multiverse index: every version of every attribute
-// nixpkgs ever shipped, joined to the store path Hydra built. Served
-// from GitHub Pages with open CORS, so the browser reads it directly.
-export const MULTIVERSE_URL = "https://nixmultiverse.com";
+// The official binary repos the index covers, in priority order: a name
+// in both core and extra resolves to the core build. multilib is left
+// out — its packages are 32-bit libraries the guest has no loader for.
+export const REPOS = ["core", "extra"];
 
-// How many attribute matches the search list shows at once, and how
-// many completions the range box's dropdown offers.
+// The only architecture Arch still ships. "any" packages live in the
+// x86_64 directory too, so one arch names every URL the page builds.
+export const ARCH = "x86_64";
+
+// The generated index, served next to the page (tools/build-index.py
+// writes it at deploy time; it is never committed).
+export const INDEX_DIR = "index";
+
+// The Internet Archive's copy of the Arch Linux Archive: one item per
+// package name, holding every version that was ever in the repos.
+// /metadata answers with CORS `*`, and /cors serves the bytes with an
+// echoed Origin — /download does not, so it is never used.
+export const ARCHIVE_METADATA_URL = "https://archive.org/metadata";
+export const ARCHIVE_DOWNLOAD_URL = "https://archive.org/cors";
+export const ARCHIVE_ITEM_PREFIX = "archlinux_pkg_";
+
+// Where a version's recipe lives. The project is the pkgbase with "+"
+// spelled "plus", the tag is the full version with ":" spelled "-".
+export const PKGBUILD_URL =
+  "https://gitlab.archlinux.org/archlinux/packaging/packages";
+
+// How many name matches the search list shows at once, and how many
+// completions the spec box's dropdown offers.
 export const SEARCH_LIMIT = 12;
 export const RANGE_COMPLETIONS = 12;
 
-// A store basename is <digest>-<name>; the digest is 32 characters of
-// nix base32, which draws from lowercase letters and digits.
-export const DIGEST_LENGTH = 32;
-export const DIGEST_PATTERN = /^[0-9a-z]{32}$/;
-
-// How many narinfo fetches fly at once during a closure walk. The bound
-// exists for the browser's connection queue, not for the cache.
+// How many index shard fetches fly at once. The bound exists for the
+// browser's connection queue, not for the host.
 export const FETCH_CONCURRENCY = 20;
 
-// How many NAR downloads decompress at once during a boot.
-export const NAR_CONCURRENCY = 4;
+// How many packages download and unpack at once during a boot.
+export const PACKAGE_CONCURRENCY = 4;
 
 // The guest files the page feeds into the VM's -L directory, served
-// under guest/ (nix/guest.nix builds them).
+// under guest/ (committed prebuilt; tools/build-guest.sh rebuilds them).
 export const GUEST_FILES = [
   "bzImage",
   "initramfs.cpio.gz",
@@ -41,7 +66,7 @@ export const GUEST_FILES = [
 ];
 
 // The machine definition: guest RAM and QEMU's arguments, shared with
-// the snapshot tool (nix/guest/machine.json says why).
+// the snapshot tool (guest/machine.json says why).
 export const MACHINE_URL = "guest/machine.json";
 
 // The qemu engine artifacts, served under qemu/. The wasm is fetched
@@ -53,6 +78,6 @@ export const QEMU_MAIN = "qemu/out.js";
 export const QEMU_WORKER = "qemu/qemu-system-x86_64.worker.js";
 
 // The migration snapshot: a guest already booted to the point of
-// waiting for the store share, so a visit resumes rather than boots.
+// waiting for the share, so a visit resumes rather than boots.
 // Optional — the page cold-boots when it is not published.
 export const SNAPSHOT_URL = "qemu/vm.state";

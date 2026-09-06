@@ -1,19 +1,19 @@
-// Autocomplete for the range box, ported from grail's own so the two
-// sites behave identically: a vertical dropdown under the input that
-// completes the attribute the caret sits in, switches to completing
+// Autocomplete for the spec box: a dropdown under the input that
+// completes the package name the caret sits in, switches to completing
 // versions once an "@" is typed, and takes arrow keys, Tab, Enter and
 // Escape.
 //
-// The fragment logic is grail's (site/js/app.js): the caret's word, the
-// "^" coexistence marker stripped, and for a version the text after the
-// last range operator, so ">=3.1" completes "3.1" and leaves ">=" alone.
+// The fragment logic is the caret's word, and for a version the text
+// after the last range operator — so ">=1.7" completes "1.7" and leaves
+// ">=" alone. Both spellings the spec lane accepts are handled, since
+// "bash>=5" has no "@" to switch on.
 
-import { attrNames, versionsOf } from "./multiverse.js";
+import { names } from "./index.js";
+import { versionsOf } from "./versions.js";
 import { RANGE_COMPLETIONS } from "./config.js";
 
-const RANGE_OPERATORS =
-  /(?:.*(?:\|\||,|\.\.|>=|<=|>|<|=))?([A-Za-z0-9._+*-]*)$/;
-const MIN_ATTR_PREFIX = 2;
+const RANGE_OPERATORS = /(?:.*(?:>=|<=|>|<|=))?([A-Za-z0-9._+*:-]*)$/;
+const MIN_NAME_PREFIX = 2;
 
 export class RangeComplete {
   constructor({ input, dropdown, onAccept = () => {} }) {
@@ -26,8 +26,10 @@ export class RangeComplete {
     input.addEventListener("input", () => this.refresh());
     input.addEventListener("blur", () => setTimeout(() => this.hide(), 150));
     input.addEventListener("keydown", (event) => this.onKeyDown(event));
+    // mousedown, not click: the input's blur would hide the dropdown
+    // before a click ever lands.
     dropdown.addEventListener("mousedown", (event) => {
-      const item = event.target.closest("li[data-i]");
+      const item = event.target.closest("button[data-i]");
       if (item !== null) {
         event.preventDefault();
         this.accept(Number(item.dataset.i));
@@ -44,23 +46,21 @@ export class RangeComplete {
     }
     const word = upto.slice(wordStart);
 
-    const at = word.indexOf("@");
-    if (at === -1) {
-      const caret = word.startsWith("^") ? 1 : 0;
-      return {
-        mode: "attr",
-        attr: null,
-        start: wordStart + caret,
-        prefix: word.slice(caret),
-      };
+    // A name ends at "@" or at the first comparison operator, whichever
+    // the reader typed.
+    const split = word.search(/[@<>=]/);
+    if (split === -1) {
+      return { mode: "name", name: null, start: wordStart, prefix: word };
     }
 
-    const attr = word.slice(word.startsWith("^") ? 1 : 0, at);
-    const match = RANGE_OPERATORS.exec(word.slice(at + 1));
+    const name = word.slice(0, split);
+    const rest =
+      word[split] === "@" ? word.slice(split + 1) : word.slice(split);
+    const match = RANGE_OPERATORS.exec(rest);
     const prefix = match === null ? "" : match[1];
     return {
       mode: "version",
-      attr,
+      name,
       start: wordStart + word.length - prefix.length,
       prefix,
     };
@@ -70,21 +70,20 @@ export class RangeComplete {
     const fragment = this.fragment();
     if (
       fragment === null ||
-      (fragment.mode === "attr" && fragment.prefix.length < MIN_ATTR_PREFIX)
+      (fragment.mode === "name" && fragment.prefix.length < MIN_NAME_PREFIX)
     ) {
       this.hide();
       return;
     }
 
     let pool;
-    if (fragment.mode === "attr") {
-      const names = await attrNames();
-      pool = Object.keys(names).filter((name) =>
+    if (fragment.mode === "name") {
+      pool = [...(await names()).keys()].filter((name) =>
         name.startsWith(fragment.prefix),
       );
     } else {
-      pool = (await versionsOf(fragment.attr))
-        .map((version) => version.version)
+      pool = (await versionsOf(fragment.name))
+        .map((build) => build.version)
         .filter((version) => version.startsWith(fragment.prefix));
     }
 
@@ -100,15 +99,11 @@ export class RangeComplete {
 
     this.dropdown.replaceChildren(
       ...this.suggestions.map(({ text }, i) => {
-        const item = document.createElement("li");
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "completion";
         item.dataset.i = String(i);
-        if (fragment.mode === "version") {
-          const at = document.createElement("span");
-          at.className = "muted";
-          at.textContent = "@";
-          item.append(at);
-        }
-        item.append(text);
+        item.textContent = text;
         return item;
       }),
     );

@@ -13,8 +13,8 @@ and each time the cause was the instrument rather than the engine.
 
 Running a binary for the first time took about fifty seconds of real
 time; running it again took one. Every explanation offered for that was
-wrong — not the store reads, not page faults, not translation, not the
-dynamic loader. `strace -cf jj --version` in the guest settled it:
+wrong — not the reads over the share, not page faults, not
+translation, not the dynamic loader. `strace -cf jj --version` in the guest settled it:
 
 ```
                     cold      warm
@@ -34,11 +34,11 @@ The machine had no entropy to offer. `RANDOM_TRUST_CPU` was set but
 never writes a seed on an `-kernel` boot, and the kernel had no
 virtio-rng driver. It now has `+rdrand` and a `virtio-rng-pci` device,
 and init forces a reseed before anything can consume randomness
-(nix/guest/reseed.c explains why that cannot be left to timing).
+(guest/src/reseed.c explains why that cannot be left to timing).
 
 A cold `jj --version` is now about 2.5 s of real time and a warm one
-about 1 s. What remains is roughly 0.1 s of store reads, and the rest is
-emulator work: interpreting and translating code the guest has not run
+about 1 s. What remains is roughly 0.1 s of reads over the share, and
+the rest is emulator work: interpreting and translating code the guest has not run
 before.
 
 ## The guest's clock was 3.3x slow
@@ -62,15 +62,15 @@ agree about the clock as much as about the devices. `sleep 10` now takes
 
 Share of non-sleeping vCPU-worker time, on a healthy guest:
 
-| | jj cold | jj warm | hot loop |
-|---|---|---|---|
-| TCI interpreter | 46.3% | 41.7% | 1.0% |
-| translation, `tb_gen_code` | 25.9% | 0.3% | 0.0% |
-| generated code | 10.4% | 25.1% | 56.3% |
-| `ffi_call_js` | 7.1% | 7.2% | 0.1% |
-| C dispatch loop | 6.6% | 12.7% | 29.7% |
-| `helper_lookup_tb_ptr` | 4.5% | 7.0% | 10.3% |
-| `_emscripten_get_now` | 0.17% | 0.14% | 0.05% |
+|                            | jj cold | jj warm | hot loop |
+| -------------------------- | ------- | ------- | -------- |
+| TCI interpreter            | 46.3%   | 41.7%   | 1.0%     |
+| translation, `tb_gen_code` | 25.9%   | 0.3%    | 0.0%     |
+| generated code             | 10.4%   | 25.1%   | 56.3%    |
+| `ffi_call_js`              | 7.1%    | 7.2%    | 0.1%     |
+| C dispatch loop            | 6.6%    | 12.7%   | 29.7%    |
+| `helper_lookup_tb_ptr`     | 4.5%    | 7.0%    | 10.3%    |
+| `_emscripten_get_now`      | 0.17%   | 0.14%   | 0.05%    |
 
 Running a program once and running a hot loop are different regimes, and
 that difference is most of this table. An earlier version of this
@@ -99,7 +99,7 @@ instead. Note also that the guest's own `time` charges emulator work to
 whatever the guest was doing, so translation appears as guest system
 time and reads like kernel work when it is not.
 
-## Memory, and how large a closure fits
+## Memory, and how much fits
 
 The engine is built with `-sTOTAL_MEMORY=2300MB` and no growth flag, and
 its memory is created as `new WebAssembly.Memory({initial: n, maximum:
@@ -107,37 +107,38 @@ n, shared: true})` with initial equal to maximum. So it is 2.41 GB of
 wasm address space, fixed when the engine is built, and the browser has
 to hand over all of it the moment the engine instantiates.
 
-| | |
-|---|---|
-| linear memory | 2.41 GB |
-| guest RAM | 512 MiB |
+|                                 |         |
+| ------------------------------- | ------- |
+| linear memory                   | 2.41 GB |
+| guest RAM                       | 512 MiB |
 | TCG code buffer (`tb-size=500`) | 500 MiB |
-| left for the unpacked closure | ~1.2 GB |
+| left for the unpacked packages  | ~1.2 GB |
 
-That budget is on the **unpacked** closure, not the download: NARs are
-decompressed into the emscripten filesystem, so a 200 MB download can
-cost 800 MB of it. The guest still sees only 492 MB of RAM either way,
-because the closure lives in the emulator's memory beside the guest
-rather than inside it. Confirmed by booting real closures: nodejs at
-219 MB unpacked boots in 9 s, llvm at 739 MB in 17 s.
+That budget is on the **unpacked** packages, not the download: a
+`.pkg.tar.zst` is decompressed into the emscripten filesystem, so a
+200 MB download can cost 800 MB of it. The guest still sees only 492 MB
+of RAM either way, because the unpacked tree lives in the emulator's
+memory beside the guest rather than inside it. Confirmed by booting real
+selections: nodejs at 219 MB unpacked boots in 9 s, llvm at 739 MB in
+17 s.
 
 The budget does not vary by machine, but whether the page runs at all
 does. Because the memory is shared and cannot grow, a device that cannot
-grant the whole reservation does not get a smaller closure — it gets no
-VM, because the engine fails to instantiate. A 2.41 GB reservation is a
+grant the whole reservation does not get a smaller selection — it gets
+no VM, because the engine fails to instantiate. A 2.41 GB reservation is a
 lot to ask of a phone.
 
 It can be raised. Chrome grants a shared wasm32 memory at every size up
 to the 4 GiB ceiling that 32-bit pointers impose, verified by allocating
 and touching both ends at 2300, 3072, 4032 and 4096 MB. Going to about
-4000 MB would take the closure budget to roughly 2.9 GB, and the build
+4000 MB would take the package budget to roughly 2.9 GB, and the build
 already handles pointers above 2 GB. But it worsens exactly the case
 that matters most, since it asks every phone for more.
 
 Two better moves than raising it:
 
 - The 500 MiB code buffer is committed and zeroed at boot, so it is
-  resident on every device. A smaller one frees closure budget *and*
+  resident on every device. A smaller one frees package budget _and_
   cuts real memory use, helping small devices instead of hurting them.
   The cost is more translation-cache flushes, visible as
   `tb_flush_count`.
@@ -155,12 +156,12 @@ Each was measured, and each was worse than or the same as doing nothing.
   9p mount runs at 46 MB/s.
 - **`tsc=unstable` on the guest command line.** Worse, not better.
 - **Prewarming the binary.** Reading it first changes nothing. Reading
-  the whole closure does help, but only if it finishes before anyone
+  the whole selection does help, but only if it finishes before anyone
   types: there is one vCPU, so a background prewarm takes the cycles the
   command wanted and wall time does not move.
 - **Blaming the page-fault path.** The counters above.
 - **Compressing the snapshot.** GitHub Pages already serves it gzipped,
-  30 MB down to 7.4 MB.
+  32 MB down to 7.4 MB.
 - **Moving to a host that sets COOP/COEP headers** to keep the browser's
   compiled-WebAssembly cache. Compiling the engine takes 56 ms warm or
   cold; the shim costs about half a second on a first-ever visit and
@@ -221,7 +222,9 @@ already compiled, so it speeds hot code and does little for a first run.
   nothing on their own. Cross-check against the page's
   `performance.now()`.
 
-`nix run .#boot-test` is the standing version of the first three: it
-boots the site repeatedly in a fresh profile and fails if a guest does
-not reach a shell. CI runs it on every push, because two hangs shipped
-while `nix flake check` was green.
+`python3 tools/boot-test.py --site _site` is the standing version of the
+first three: it boots the site repeatedly in a fresh profile and fails
+if a guest does not reach a shell. It needs a real browser and the
+network, so CI does not run it; run it by hand before pushing anything
+that touches the guest or the boot path. Two hangs shipped while every
+other check was green, and it is the only one that can see them.

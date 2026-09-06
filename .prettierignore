@@ -1,0 +1,16 @@
+# Nothing generated, fetched or copied is ours to format.
+node_modules/
+vendor/
+_site/
+.cache/
+
+# The package index is built at deploy time (tools/build-index.py).
+index/
+site/index/
+
+# The guest image: a kernel, an initramfs and the sources they are
+# built from, none of it prettier's business.
+guest/
+
+# makepkg's output, byte-for-byte what the page downloads.
+site/examples/repo/

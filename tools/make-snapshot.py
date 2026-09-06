@@ -3,7 +3,7 @@
 
 Boots the guest on a NATIVE build of the same qemu-wasm fork the
 browser engine comes from, waits for init to reach the point where it
-is spinning for the store share, and writes the VM state out with
+is spinning for the 9p share, and writes the VM state out with
 `migrate`. See docs/engine.md for building the native binary and
 docs/design.md for why the snapshot is taken there.
 
@@ -24,6 +24,11 @@ import time
 # What init prints once the kernel is up and it is polling for the
 # share. Everything expensive has happened by then, and nothing that
 # depends on the share has.
+#
+# This marker and the one below are the guest's own words, and the
+# guest is trynix's, unchanged. They stay: the initramfs that prints
+# them is inside the published snapshot, so a rename here is a rename
+# there, and a new snapshot.
 READY_MARKER = b"trynix: waiting for the store"
 
 READY_TIMEOUT_SECONDS = 120
@@ -40,12 +45,12 @@ MIGRATE_TIMEOUT_SECONDS = 300
 #
 # The kernel's own clocksource messages cannot be used for this: the
 # machine boots with loglevel=4, which keeps everything below an error
-# off the console. init prints the name instead (nix/guest/init).
+# off the console. init prints the name instead (guest/src/init).
 CLOCKSOURCE_PREFIX = b"trynix: clocksource "
 CLOCKSOURCE_GOOD = b"tsc"
 CLOCKSOURCE_TIMEOUT_SECONDS = 60
 
-# The machine definition the guest image carries (nix/guest/machine.json):
+# The machine definition the guest image carries (guest/machine.json):
 # the page starts QEMU from the same file, which is what keeps the two
 # ends of the migration identical.
 MACHINE_FILE = "machine.json"
@@ -111,7 +116,11 @@ def clocksource_complaint(serial_path, deadline):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--qemu", required=True, help="native qemu-system-x86_64 from the fork")
-    parser.add_argument("--guest", required=True, help="the guest image directory (nix build .#guest)")
+    parser.add_argument(
+        "--guest",
+        required=True,
+        help="the committed guest/ image (tools/build-guest.sh rebuilds it)",
+    )
     parser.add_argument("--out", required=True, help="where to write vm.state")
     args = parser.parse_args()
 

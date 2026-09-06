@@ -1,33 +1,25 @@
-// Page wiring: choose packages out of the nixpkgs-multiverse index —
-// by search, by version range, or by raw store path — walk the union of
-// their runtime closures live from cache.nixos.org, then boot.
-// qemu-wasm runs an x86_64 guest in the tab, the closure rides in over
-// virtio-9p, and the serial console lands in the terminal.
+// Page wiring: choose Arch packages out of the site's index — by
+// search, by version spec, or from an extra repository — walk the union
+// of their dependency closures live from the mirrors and archive.org,
+// then boot. qemu-wasm runs an x86_64 guest in the tab, the packages
+// ride in over virtio-9p, and the serial console lands in the terminal.
 // docs/design.md holds the architecture.
 
 import { walkClosure } from "./closure.js";
-import { fetchNar } from "./store.js";
 import { startVM } from "./boot.js";
-import { fetchWithProgress, mapConcurrent, warmHttpCache } from "./net.js";
+import { fetchWithProgress, warmHttpCache } from "./net.js";
 import { ProgressPanel } from "./progress.js";
-import { PackagePicker } from "./search.js";
+import { PackagePicker, repoClass } from "./search.js";
 import { parseSpecs, resolveSpecs } from "./ranges.js";
-import { versionsOf } from "./multiverse.js";
+import { versionsOf } from "./versions.js";
+import { addRepo, current, indexInfo } from "./index.js";
+import { fetchRepoDb } from "./repodb.js";
 import { RangeComplete } from "./complete.js";
 import { readUrl, writeUrl } from "./url.js";
-import {
-  parseSubstituters,
-  readSubstituters,
-  setExtraSubstituters,
-  verify,
-} from "./substituters.js";
 import { humanBytes } from "./format.js";
 import {
-  DIGEST_LENGTH,
-  DIGEST_PATTERN,
   GUEST_FILES,
   MACHINE_URL,
-  NAR_CONCURRENCY,
   QEMU_MAIN,
   QEMU_WASM,
   QEMU_WORKER,
@@ -35,16 +27,13 @@ import {
 } from "./config.js";
 import { asset, assets, manifest } from "./assets.js";
 import { buildReport } from "./report.js";
-import { binOutputOf } from "./outputs.js";
 import { log, onLog } from "./log.js";
 
-const STORE_PREFIX = "/nix/store/";
-
-const storePathInput = document.getElementById("store-path");
-const walkForm = document.getElementById("walk-form");
-const rangesForm = document.getElementById("ranges-form");
-const rangesInput = document.getElementById("ranges-input");
-const rangesResults = document.getElementById("ranges-results");
+const specsForm = document.getElementById("specs-form");
+const specsInput = document.getElementById("specs-input");
+const specsResults = document.getElementById("specs-results");
+const reposInput = document.getElementById("repos-input");
+const reposStatus = document.getElementById("repos-status");
 const selectionElement = document.getElementById("selection");
 const status = document.getElementById("status");
 const result = document.getElementById("result");
@@ -58,76 +47,126 @@ const consoleNote = document.getElementById("console-note");
 const rebootLink = document.getElementById("reboot-link");
 const debugLog = document.getElementById("debug-log");
 const addNote = document.getElementById("add-note");
+const indexInfoElement = document.getElementById("index-info");
 
-// The selection: digest -> { digest, label, attr, version, storePath }.
-// A package chosen any of the three ways lands here in the same shape,
-// which is what lets the URL describe all of them.
+// The selection: name -> { build, pinned }. One version per name, the
+// way pacman installs one; choosing another version of a selected
+// package replaces it. `pinned` says whether the reader asked for this
+// exact version or for "the newest", which is what the link records.
 const selection = new Map();
 
-const basenameOf = (info) => info.storePath.slice(STORE_PREFIX.length);
+const keyOf = (build) => `${build.name}@${build.version}`;
 
-// Accept a full /nix/store path, a store basename, or a bare digest; a
-// walk needs only the digest. Returns null when no digest is there.
-function digestFromPath(raw) {
-  let s = raw.trim();
-  if (s.startsWith(STORE_PREFIX)) {
-    s = s.slice(STORE_PREFIX.length);
-  }
-  s = s.slice(0, DIGEST_LENGTH);
-  return DIGEST_PATTERN.test(s) ? s : null;
-}
-
-function select(entry) {
-  selection.set(entry.digest, entry);
+function select(build, { pinned }) {
+  selection.set(build.name, { build, pinned });
   render();
 }
 
-function deselect(digest) {
-  selection.delete(digest);
+function deselect(name) {
+  selection.delete(name);
   render();
 }
 
-// The extra caches in effect: the page's copy of what the caches lane
-// says, and what the link carries.
-let extraCaches = [];
+// The extra repositories in effect: what the repos lane says, and what
+// the link carries. Each is a pacman db on a host that sends CORS
+// headers; its packages take precedence over the index.
+let extraRepos = [];
 
-// The link for what is on screen: the selection and the caches.
+// The link for what is on screen: the selection and the repositories.
 function urlState() {
-  const entries = [...selection.values()];
   return {
-    pkgs: entries
-      .filter((e) => e.attr !== undefined)
-      .map((e) => ({ attr: e.attr, version: e.version })),
-    paths: entries
-      .filter((e) => e.attr === undefined)
-      .map((e) => e.storePath ?? e.digest),
-    caches: extraCaches,
+    pkgs: [...selection.values()].map(({ build, pinned }) => ({
+      name: build.name,
+      version: pinned ? build.version : null,
+    })),
+    repos: extraRepos,
   };
 }
 
-// The chips, the status line, and the address bar all describe the same
+// A build's date, for telling one archived version from another.
+function dateOf(build) {
+  if (build.builddate === null || build.builddate === undefined) {
+    return "";
+  }
+  return new Date(build.builddate * 1000).toISOString().slice(0, 10);
+}
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  Object.assign(node, props);
+  node.append(...children);
+  return node;
+}
+
+// One row of the selection: the name, a version menu, the repository
+// chip, the PKGBUILD that built it, and a way to drop it. The menu
+// starts with the one version known and fills in as the full list —
+// current repos plus the Arch Linux Archive — arrives.
+function selectionRow({ build, pinned }) {
+  const versions = el("select", { className: "version" });
+  versions.setAttribute("aria-label", `${build.name} version`);
+  const option = (b) =>
+    el(
+      "option",
+      { value: b.version },
+      `${b.version} · ${b.repo}${b.repo === "archive" ? ` ${dateOf(b)}` : ""}`,
+    );
+  versions.append(option(build));
+  versions.value = build.version;
+
+  versionsOf(build.name).then(
+    (all) => {
+      if (selection.get(build.name)?.build !== build) {
+        return;
+      }
+      versions.replaceChildren(...all.map(option));
+      versions.value = build.version;
+      versions.onchange = () => {
+        const chosen = all.find((b) => b.version === versions.value);
+        if (chosen !== undefined) {
+          select(chosen, { pinned: true });
+        }
+      };
+    },
+    (err) => log(`versions of ${build.name}: ${err.message}`),
+  );
+
+  const row = el(
+    "div",
+    { className: "pick" },
+    el("span", { className: "pkg" }, build.name),
+    versions,
+    el("span", { className: repoClass(build.repo) }, build.repo),
+    el("a", {
+      className: "pkgbuild",
+      href: build.pkgbuild,
+      target: "_blank",
+      rel: "noopener",
+      textContent: "PKGBUILD",
+    }),
+    el("button", {
+      type: "button",
+      className: "remove",
+      textContent: "×",
+      onclick: () => deselect(build.name),
+    }),
+  );
+  row.dataset.key = keyOf(build);
+  row.title = pinned
+    ? `${build.name} ${build.version}`
+    : `${build.name}, newest`;
+  return row;
+}
+
+// The rows, the status line, and the address bar all describe the same
 // selection, so they are redrawn together.
 function render() {
   const entries = [...selection.values()];
-
-  selectionElement.replaceChildren(
-    ...entries.map((entry) => {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "chip";
-      chip.title = `${entry.storePath ?? entry.digest} — click to remove`;
-      chip.textContent = `${entry.label} ✕`;
-      chip.onclick = () => deselect(entry.digest);
-      return chip;
-    }),
-  );
+  selectionElement.replaceChildren(...entries.map(selectionRow));
 
   bootButton.disabled = entries.length === 0;
   status.textContent = entries.length === 0 ? "nothing selected yet" : "";
 
-  // A package with an attribute is shareable by name; a raw store path
-  // rides as a path, and the caches ride along. Either way the link
-  // reproduces this screen.
   history.replaceState(null, "", writeUrl(urlState()));
 }
 
@@ -137,242 +176,190 @@ onLog((lines) => {
   debugLog.scrollTop = debugLog.scrollHeight;
 });
 
-const entryOf = (version) => ({
-  digest: version.digest,
-  label: `${version.attr} ${version.version}`,
-  attr: version.attr,
-  version: version.version,
-  storePath: version.storePath,
-});
-
 // ---------- the three lanes ----------
+
+// Picking a name takes its newest build, which is what the index has.
+async function selectName(name) {
+  const build = await current(name);
+  if (build === null) {
+    status.textContent = `${name} is not in the index`;
+    return;
+  }
+  select(build, { pinned: false });
+}
 
 new PackagePicker({
   input: document.getElementById("search"),
   results: document.getElementById("search-results"),
-  onPick: (version) => select(entryOf(version)),
+  onPick: (hit) => selectName(hit.name),
 });
 
-rangesForm.addEventListener("submit", async (event) => {
+specsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  rangesResults.replaceChildren();
+  specsResults.replaceChildren();
 
   let specs;
   try {
-    specs = parseSpecs(rangesInput.value);
+    specs = parseSpecs(specsInput.value);
   } catch (err) {
-    rangesResults.textContent = String(err);
+    specsResults.textContent = String(err);
     return;
   }
 
+  specsResults.textContent = "resolving…";
   const { resolved, problems } = await resolveSpecs(specs);
-  for (const version of resolved) {
-    select(entryOf(version));
+  for (const build of resolved) {
+    select(build, { pinned: true });
   }
 
   const lines = [
-    ...resolved.map((v) => `${v.attr} ${v.version}`),
+    ...resolved.map((b) => `${b.name} ${b.version} (${b.repo})`),
     ...problems.map((p) => `unresolved: ${p}`),
   ];
-  rangesResults.textContent = lines.join(" · ");
+  specsResults.textContent = lines.join(" · ");
 });
-
-// Autocomplete for the range box, and a live grail link for the line.
-// grail answers a question this lane does not ask: whether one moment
-// in nixpkgs history satisfied every spec at once, so the versions were
-// built against each other.
-const grailLink = document.getElementById("grail-link");
-const GRAIL_URL = "https://fzakaria.github.io/grail/";
-
-function renderGrailLink() {
-  const query = rangesInput.value.trim();
-  grailLink.replaceChildren();
-  if (query === "") {
-    return;
-  }
-  const link = document.createElement("a");
-  link.href = `${GRAIL_URL}?q=${encodeURIComponent(query)}`;
-  link.textContent = "Check in grail whether these versions ever coexisted";
-  link.rel = "noopener";
-  link.target = "_blank";
-  grailLink.append(link);
-}
 
 new RangeComplete({
-  input: rangesInput,
-  dropdown: document.getElementById("ranges-complete"),
-  onAccept: renderGrailLink,
+  input: specsInput,
+  dropdown: document.getElementById("specs-complete"),
+  onAccept: () => {},
 });
-rangesInput.addEventListener("input", renderGrailLink);
 
-walkForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  const raw = storePathInput.value.trim();
-  const digest = digestFromPath(raw);
-  if (digest === null) {
-    status.textContent = `need a store path with its ${DIGEST_LENGTH}-character digest`;
-    return;
+// The repository list: one db URL per line. Each that loads is
+// registered under the db's basename and goes into the link; one that
+// does not is said so and leaves the others in effect.
+function labelOf(url) {
+  const base = url.split("/").pop() ?? url;
+  return base.replace(/\.db(\.tar(\.\w+)?)?$/, "") || url;
+}
+
+async function applyRepos(urls) {
+  const loaded = [];
+  const notes = [];
+  for (const url of urls) {
+    try {
+      const entries = await fetchRepoDb(url);
+      addRepo(labelOf(url), url, entries);
+      loaded.push(url);
+      notes.push(`${labelOf(url)}: ${entries.size} packages`);
+    } catch (err) {
+      notes.push(`${url}: ${err.message}`);
+      log(`repository ${url}: ${err.message}`);
+    }
   }
-  select({
-    digest,
-    label: raw.startsWith(STORE_PREFIX) ? raw.slice(STORE_PREFIX.length) : raw,
-    storePath: raw.startsWith(STORE_PREFIX) ? raw : undefined,
-  });
-  storePathInput.value = "";
-});
-
-// The cache list: extra substituters and their keys. Every edit that
-// parses goes straight into the link; one that does not is said so and
-// leaves the last good list in effect.
-const cachesInput = document.getElementById("caches-input");
-const cachesStatus = document.getElementById("caches-status");
-
-function applyCaches(list) {
-  extraCaches = list;
-  setExtraSubstituters(list);
-  cachesInput.value = list.map((s) => `${s.url} ${s.key}`).join("\n");
+  extraRepos = loaded;
+  reposStatus.textContent = notes.join(" · ");
   render();
 }
 
-cachesInput.addEventListener("input", () => {
-  try {
-    extraCaches = parseSubstituters(cachesInput.value);
-    setExtraSubstituters(extraCaches);
-    cachesStatus.textContent =
-      extraCaches.length === 0 ? "" : "in the link above";
-    render();
-  } catch (err) {
-    cachesStatus.textContent = String(err);
-  }
+reposInput.addEventListener("change", () => {
+  const urls = reposInput.value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  applyRepos(urls);
 });
 
-// The lane tabs: anchors so each is a real link, one visible at a time.
+// The lane tabs: buttons, one panel visible at a time.
 const laneNav = document.getElementById("lanes");
 laneNav.addEventListener("click", (event) => {
-  const tab = event.target.closest("a[data-lane]");
+  const tab = event.target.closest("[data-lane]");
   if (tab === null) {
     return;
   }
-  event.preventDefault();
-  for (const link of laneNav.querySelectorAll("a[data-lane]")) {
-    link.classList.toggle("active", link === tab);
+  for (const button of laneNav.querySelectorAll("[data-lane]")) {
+    const active = button === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
   }
-  for (const lane of document.querySelectorAll(".lane[data-lane]")) {
-    lane.hidden = lane.dataset.lane !== tab.dataset.lane;
+  for (const lane of ["search", "specs", "repos"]) {
+    document.getElementById(`lane-${lane}`).hidden = lane !== tab.dataset.lane;
   }
 });
 
 // ---------- the boot ----------
 
-// What the reader selected, each with the `bin` output of a package
-// that keeps its programs in one. Booting jq means booting jq.out *and*
-// jq.bin: the two are separate store paths and neither references the
-// other. Returns [{ digest, bin }], bin null when there is no such
-// sibling.
-async function rootsOf(digests) {
-  const roots = [];
-  for (const digest of digests) {
-    const bin = await binOutputOf(digest);
-    roots.push({ digest, bin: bin === digest ? null : bin });
-  }
-  return roots;
+// What the guest has, by name: the build, and what its package weighed.
+// A later addition only fetches what is new, and the report and the
+// table read from here.
+let mounted = new Map();
+
+function recordPackage(pkg) {
+  const unpacked = pkg.entries.reduce((sum, e) => sum + (e.size ?? 0), 0);
+  mounted.set(pkg.build.name, {
+    build: pkg.build,
+    compressed: pkg.compressed,
+    unpacked,
+    files: pkg.entries.length,
+  });
 }
 
-// Every store path the roots name, selection order, no duplicates.
-function digestsOf(roots) {
-  const digests = [];
-  for (const { digest, bin } of roots) {
-    for (const d of [digest, bin]) {
-      if (d !== null && !digests.includes(d)) {
-        digests.push(d);
-      }
-    }
-  }
-  return digests;
-}
+// The closure as a table, largest unpacked size first, each version
+// linked to the PKGBUILD that built it.
+function renderClosure() {
+  const rows = [...mounted.values()].sort((a, b) => b.unpacked - a.unpacked);
 
-// Basenames of the digests the closure knows, in the order given.
-function basenamesOf(closure, digests) {
-  return digests
-    .map((digest) => closure.get(digest))
-    .filter((info) => info !== undefined)
-    .map(basenameOf);
-}
-
-// Say which selections put nothing on PATH. A root is silent when
-// neither it nor its bin sibling offers a program: nixpkgs splits many
-// packages so the binaries live in a separate output, the index
-// publishes the default one, and the sibling map does not know every
-// split.
-function reportSilent(vm, closure, roots) {
-  const silent = roots
-    .filter(({ digest, bin }) =>
-      basenamesOf(
-        closure,
-        [digest, bin].filter((d) => d !== null),
-      ).every((basename) => vm.programsOf(basename).length === 0),
-    )
-    .map(({ digest }) => basenamesOf(closure, [digest])[0] ?? digest);
-  if (silent.length === 0) {
-    return;
-  }
-  status.textContent =
-    `no programs in ${silent.join(", ")} — nixpkgs splits some packages so ` +
-    `their binaries live in a separate output, and the index publishes the default one`;
-}
-
-// The union of every selected root's runtime closure, in one map. Roots
-// that share a glibc fetch it once.
-async function walkRoots(digests, onProgress, known = new Map()) {
-  const closure = new Map(known);
-  for (const digest of digests) {
-    const one = await walkClosure(
-      digest,
-      (n) => onProgress(closure.size + n),
-      closure,
-    );
-    for (const [key, info] of one) {
-      closure.set(key, info);
-    }
-  }
-  // Only what this walk added; the caller already has the rest.
-  for (const key of known.keys()) {
-    closure.delete(key);
-  }
-  return closure;
-}
-
-// The closure as a table, largest unpacked size first.
-function renderClosure(closure) {
-  const infos = [...closure.values()].sort((a, b) => b.narSize - a.narSize);
-
-  const table = document.createElement("table");
-  const head = table.insertRow();
+  const table = el("table", { className: "closure" });
+  const head = table.createTHead().insertRow();
   for (const [label, cls] of [
-    ["store path", "path"],
+    ["package", "pkg"],
+    ["version", "version"],
+    ["repo", "repo"],
     ["download", "size"],
     ["unpacked", "size"],
+    ["", "pkgbuild"],
   ]) {
-    const th = document.createElement("th");
-    th.textContent = label;
-    th.className = cls;
-    head.append(th);
+    head.append(el("th", { textContent: label, className: cls }));
   }
 
-  for (const info of infos) {
-    const row = table.insertRow();
-    for (const [text, cls] of [
-      [info.storePath, "path"],
-      [humanBytes(info.fileSize), "size"],
-      [humanBytes(info.narSize), "size"],
-    ]) {
-      const td = row.insertCell();
-      td.textContent = text;
-      td.className = cls;
-    }
+  const body = table.createTBody();
+  for (const { build, compressed, unpacked } of rows) {
+    const row = body.insertRow();
+    row.append(
+      el("td", { className: "pkg" }, build.name),
+      el("td", { className: "version" }, build.version),
+      el(
+        "td",
+        {},
+        el("span", { className: repoClass(build.repo) }, build.repo),
+      ),
+      el("td", { className: "size" }, humanBytes(compressed ?? 0)),
+      el("td", { className: "size" }, humanBytes(unpacked)),
+      el(
+        "td",
+        {},
+        el("a", {
+          href: build.pkgbuild,
+          target: "_blank",
+          rel: "noopener",
+          textContent: "PKGBUILD",
+        }),
+      ),
+    );
   }
 
   result.replaceChildren(table);
+}
+
+// Say which selections put nothing on PATH, and what could not be
+// resolved. Neither stops the boot: a library package has no programs
+// by design, and a missing dependency is often one the program never
+// touches.
+function reportOutcome(vm, roots, problems) {
+  const silent = roots
+    .filter((build) => vm.programsOf(build.name).length === 0)
+    .map((build) => build.name);
+  const notes = [];
+  if (silent.length > 0) {
+    notes.push(`no programs in /usr/bin from ${silent.join(", ")}`);
+  }
+  if (problems.length > 0) {
+    notes.push(...problems);
+    for (const problem of problems) {
+      log(`closure: ${problem}`);
+    }
+  }
+  status.textContent = notes.join(" · ");
 }
 
 // A booted VM cannot be replaced in place: the emscripten module owns
@@ -381,9 +368,6 @@ function renderClosure(closure) {
 // new selection and asks for it to start straight away.
 let vmStarted = false;
 let vm = null;
-// Everything the running guest already has, so a later addition only
-// fetches what is new.
-let mounted = new Map();
 // How the guest started, for the report.
 let bootMode = "not started";
 
@@ -392,9 +376,11 @@ function reboot() {
   location.reload();
 }
 
+const selectedBuilds = () => [...selection.values()].map((e) => e.build);
+
 // The boot flow. The engine, the guest image, the snapshot and the
-// closure download in parallel under one progress panel; the engine
-// is instantiated the moment its inputs are in, and every NAR is
+// packages download in parallel under one progress panel; the engine
+// is instantiated the moment its inputs are in, and every package is
 // written into the share as it lands, while the rest are still on
 // their way. When the last one is in, QEMU is released and the
 // terminal goes live.
@@ -405,43 +391,13 @@ async function boot() {
   consoleNote.textContent = "fetching…";
   const panel = new ProgressPanel(bootProgress);
 
-  const walkRow = panel.row("closure walk");
-  const signatureRow = panel.row("signatures");
   const engineRow = panel.row("qemu engine");
   const guestRow = panel.row("guest image");
   const snapshotRow = panel.row("snapshot");
-  const closureRow = panel.row("closure");
+  const packagesRow = panel.row("packages");
   const vmRow = panel.row("virtual machine");
 
   try {
-    const roots = await rootsOf([...selection.keys()]);
-    const rootDigests = digestsOf(roots);
-    const closure = await walkRoots(rootDigests, (n) =>
-      walkRow.note(`${n} narinfos`),
-    );
-    log(`closure: ${closure.size} paths from ${rootDigests.length} roots`);
-    walkRow.done(`${closure.size} paths`);
-    renderClosure(closure);
-
-    // Signatures are checked against the configured keys. A path no key
-    // vouches for is still booted — the reader chose the cache — but
-    // the count is reported rather than hidden.
-    const substituters = readSubstituters();
-    const verdicts = await Promise.all(
-      [...closure.values()].map((i) => verify(i, substituters)),
-    );
-    const unverifiable = verdicts.filter((v) => v === null).length;
-    const unsigned = verdicts.filter((v) => v === false).length;
-    if (unverifiable > 0) {
-      signatureRow.done("this browser cannot check Ed25519");
-    } else if (unsigned > 0) {
-      signatureRow.fail(
-        `${unsigned} of ${closure.size} unsigned by a known key`,
-      );
-    } else {
-      signatureRow.done(`${closure.size} verified`);
-    }
-
     const engineUrls = await assets([QEMU_MAIN, QEMU_WASM, QEMU_WORKER]);
     const engine = {
       main: engineUrls.get(QEMU_MAIN),
@@ -494,7 +450,7 @@ async function boot() {
     );
 
     // The engine starts as soon as its own inputs are in, without
-    // waiting for the closure; the guest files and the snapshot are
+    // waiting for the packages; the guest files and the snapshot are
     // handed over rather than kept.
     let resuming = false;
     const vmPromise = Promise.all([
@@ -520,23 +476,31 @@ async function boot() {
       });
     });
 
-    // Each NAR goes into the share the moment it is parsed, and is
-    // dropped from the page's hands right after. Nothing here ever
-    // holds more than the few NARs in flight.
-    const infos = [...closure.values()];
-    closureRow.setTotal(infos.reduce((sum, i) => sum + i.fileSize, 0));
-    const closurePromise = mapConcurrent(
-      infos,
-      NAR_CONCURRENCY,
-      async (info) => {
-        const entries = await fetchNar(info, (n) => closureRow.add(n));
-        const vm = await vmPromise;
-        vm.share.write(basenameOf(info), entries);
+    // Each package goes into the share the moment it is unpacked, and
+    // is dropped from the page's hands right after. Nothing here ever
+    // holds more than the few packages in flight.
+    const roots = selectedBuilds();
+    let discovered = 0;
+    const { builds, problems } = await walkClosure(roots, {
+      onDiscover: () => {
+        discovered += 1;
       },
-    ).then(() => closureRow.done());
+      onTotal: (n) => packagesRow.setTotal(n),
+      onBytes: (n) => packagesRow.add(n),
+      onPackage: async (pkg) => {
+        const vm = await vmPromise;
+        vm.share.write(pkg);
+        recordPackage(pkg);
+        renderClosure();
+      },
+    });
+    packagesRow.done(`${builds.length} packages`);
+    log(
+      `closure: ${builds.length} packages from ${roots.length} roots` +
+        (problems.length > 0 ? `, ${problems.length} problems` : ""),
+    );
 
     vm = await vmPromise;
-    await closurePromise;
 
     consoleNote.textContent = resuming
       ? "resuming the guest…"
@@ -545,11 +509,10 @@ async function boot() {
     // says what the guest is doing, not that it is done.
     vmRow.note(resuming ? "resuming…" : "booting…");
     vmStarted = true;
-    mounted = closure;
 
-    const ready = vm.run(basenamesOf(closure, rootDigests));
+    const ready = vm.run();
     log("virtual machine running");
-    reportSilent(vm, closure, roots);
+    reportOutcome(vm, roots, problems);
     bootButton.textContent = "Add to the running VM";
     rebootLink.hidden = false;
     addNote.hidden = false;
@@ -585,46 +548,35 @@ rebootLink.addEventListener("click", (event) => {
 //
 // Nothing is rebooted and nothing is typed at the guest: the share is
 // a directory in the emscripten filesystem, 9p passes the guest's
-// lookups straight through to it, and the programs land as links in
-// the one directory the guest already has on PATH. Only paths it does
-// not already have are fetched.
+// lookups straight through to it, and the programs land in the
+// /usr/bin the guest already has on PATH. Only packages it does not
+// already have are fetched.
 async function addToRunningVM() {
   bootButton.disabled = true;
   const panel = new ProgressPanel(bootProgress);
   const row = panel.row("adding");
 
   try {
-    const roots = await rootsOf([...selection.keys()]);
-    const rootDigests = digestsOf(roots);
-    const fresh = await walkRoots(
-      rootDigests,
-      (n) => row.note(`${n} narinfos`),
-      mounted,
+    const roots = selectedBuilds();
+    const known = new Map(
+      [...mounted.values()].map(({ build }) => [build.name, build]),
     );
-    if (fresh.size === 0) {
+    const { builds, problems } = await walkClosure(roots, {
+      known,
+      onTotal: (n) => row.setTotal(n),
+      onBytes: (n) => row.add(n),
+      onPackage: async (pkg) => {
+        vm.add(pkg);
+        recordPackage(pkg);
+      },
+    });
+    if (builds.length === 0) {
       row.done("already there");
-      bootButton.disabled = false;
-      return;
+    } else {
+      row.done(`${builds.length} packages added`);
     }
-
-    const infos = [...fresh.values()];
-    row.setTotal(infos.reduce((sum, i) => sum + i.fileSize, 0));
-    const unpacked = await mapConcurrent(
-      infos,
-      NAR_CONCURRENCY,
-      async (info) => ({
-        basename: basenameOf(info),
-        entries: await fetchNar(info, (n) => row.add(n)),
-      }),
-    );
-
-    for (const [digest, info] of fresh) {
-      mounted.set(digest, info);
-    }
-    vm.add(unpacked, basenamesOf(mounted, rootDigests));
-    reportSilent(vm, mounted, roots);
-    row.done(`${fresh.size} paths added`);
-    renderClosure(mounted);
+    reportOutcome(vm, roots, problems);
+    renderClosure();
   } catch (err) {
     row.fail(String(err));
   } finally {
@@ -641,9 +593,9 @@ const reportStatus = document.getElementById("report-status");
 document.getElementById("copy-report").addEventListener("click", async () => {
   const report = buildReport({
     manifest: await manifest(),
-    closure: mounted,
+    packages: [...mounted.values()],
     terminal: vm?.terminal ?? null,
-    transcript: window.trynix?.transcript() ?? "",
+    transcript: window.tryarch?.transcript() ?? "",
     boot: bootMode,
   });
   try {
@@ -657,35 +609,41 @@ document.getElementById("copy-report").addEventListener("click", async () => {
 
 // ---------- restoring a shared link ----------
 
-// A package named without a version means "whatever the index has
-// newest", which is what makes ?pkg=ripgrep a durable link.
-async function restore({ pkgs, paths }) {
-  for (const path of paths) {
-    const digest = digestFromPath(path);
-    if (digest !== null) {
-      select({
-        digest,
-        label: path.startsWith(STORE_PREFIX)
-          ? path.slice(STORE_PREFIX.length)
-          : path,
-        storePath: path.startsWith(STORE_PREFIX) ? path : undefined,
-      });
-    }
+// A package named without a version means "whatever the repos have
+// now", which is what makes ?pkg=jq a durable link; one with a version
+// is looked up across the repos and the archive.
+async function restore({ pkgs, repos }) {
+  if (repos.length > 0) {
+    reposInput.value = repos.join("\n");
+    await applyRepos(repos);
   }
 
-  for (const { attr, version } of pkgs) {
-    const versions = await versionsOf(attr);
-    const hit =
-      version === null
-        ? versions.find((v) => v.alive !== false)
-        : versions.find((v) => v.version === version);
-    if (hit === undefined) {
-      status.textContent = `${attr}${version === null ? "" : ` ${version}`} is not in the index`;
+  for (const { name, version } of pkgs) {
+    if (version === null) {
+      await selectName(name);
       continue;
     }
-    select(entryOf(hit));
+    const hit = (await versionsOf(name)).find((b) => b.version === version);
+    if (hit === undefined) {
+      status.textContent = `${name} ${version} is not in the repos or the archive`;
+      continue;
+    }
+    select(hit, { pinned: true });
   }
 }
+
+// The footer says how fresh the index is; a stale one is the first
+// thing to suspect when a download 404s.
+indexInfo().then(
+  ({ generated, count }) => {
+    const when = generated ? new Date(generated).toUTCString() : "unknown";
+    indexInfoElement.textContent = `index of ${count} packages, generated ${when}`;
+  },
+  (err) => {
+    indexInfoElement.textContent = "index unavailable";
+    log(`index: ${err.message}`);
+  },
+);
 
 // Warm the cache while the reader is still choosing. The engine, the
 // guest image and the snapshot are the same bytes for every boot and
@@ -712,12 +670,11 @@ async function prefetch() {
 }
 
 const initial = readUrl();
-applyCaches(initial.caches);
 
 // Not while a boot is already starting. A reboot lands on ?boot=1 and
 // the boot fetches these itself; racing it only doubles ~75 MB of
 // engine and snapshot in flight, which is enough to make a fetch fail
-// outright on a tab that is already holding a closure in memory.
+// outright on a tab that is already holding packages in memory.
 //
 // requestIdleCallback keeps the rest off the critical path on a slow
 // device; not every browser has it.
@@ -729,19 +686,10 @@ if (!initial.boot) {
   }
 }
 render();
-if (initial.pkgs.length > 0 || initial.paths.length > 0) {
+if (initial.pkgs.length > 0 || initial.repos.length > 0) {
   restore(initial).then(() => {
     if (initial.boot && selection.size > 0) {
       boot();
     }
   });
-}
-
-// The site build substitutes the derivation's own $out into STORE_PATH, so
-// the footer names the store path serving the page. A local checkout still
-// carries the placeholder, and the line stays hidden.
-const STORE_PATH = "__STORE_PATH__";
-if (!STORE_PATH.startsWith("__")) {
-  document.getElementById("store-path-footer").textContent = STORE_PATH;
-  document.getElementById("store").hidden = false;
 }

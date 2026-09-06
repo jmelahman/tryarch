@@ -31,6 +31,12 @@ export const THEME = {
 // (80 columns wants the phone turned sideways.)
 const FONT_SIZE = 14;
 const FONT_SIZE_TOUCH = 12;
+// The page's own monospace face (style.css), so the console matches the
+// rest of the site. The terminal draws on a canvas and measures the
+// cell from whatever font is available when it opens, so the face is
+// loaded first; a browser without it falls through the stack.
+const FONT_FAMILY =
+  '"Plex Mono", ui-monospace, "Cascadia Code", Menlo, monospace';
 const FONT_SIZE_MIN = 6;
 const FONT_SIZE_MAX = 24;
 const SCROLLBACK_LINES = 5000;
@@ -122,8 +128,10 @@ export async function openTerminal(element, keyBarElement) {
     BACKGROUND_PROPERTY,
     THEME.background,
   );
+  await document.fonts?.load(`${FONT_SIZE}px "Plex Mono"`).catch(() => {});
   const terminal = new GhosttyTerminal({
     theme: THEME,
+    fontFamily: FONT_FAMILY,
     fontSize: touch.matches ? FONT_SIZE_TOUCH : FONT_SIZE,
     scrollback: SCROLLBACK_LINES,
     cursorBlink: true,

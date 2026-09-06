@@ -1,0 +1,33 @@
+# A package that exists in no Arch repository but the one next to it.
+# It stands in for whatever you have just built and want someone else
+# to run — a patch, a branch, a review — and it is what the "extra
+# repository" example on the site boots.
+#
+# Built into ../../site/examples/repo by tools/make-example-repo.sh,
+# and served from there by the site itself.
+#
+# arch=any and no sources: nothing is compiled, so the package is a few
+# hundred bytes and makepkg needs no network.
+
+pkgname=hello-tryarch
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Greets you from a virtual machine inside a browser tab"
+arch=('any')
+url="https://github.com/jmelahman/tryarch"
+license=('MIT')
+depends=('sh')
+
+package() {
+  install -d "$pkgdir/usr/bin"
+
+  # A quoted heredoc: the $(uname -r) below is for the guest to run,
+  # not for makepkg to expand here.
+  cat > "$pkgdir/usr/bin/hello-tryarch" <<'EOF'
+#!/bin/sh
+echo "hello from tryarch"
+echo "the guest kernel is $(uname -r)"
+EOF
+
+  chmod 755 "$pkgdir/usr/bin/hello-tryarch"
+}

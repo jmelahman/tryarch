@@ -9,29 +9,30 @@
       name="viewport"
       content="width=device-width, initial-scale=1, interactive-widget=resizes-content"
     />
-    <title>trynix</title>
+    <title>tryarch</title>
     <meta
       name="description"
-      content="Boot anything nixpkgs ever shipped, in your browser: qemu-wasm plus the nixpkgs-multiverse index, no server anywhere."
+      content="Boot anything Arch Linux ever shipped, in your browser: an x86_64 Linux guest in the tab, official Arch packages and their history, no server anywhere."
     />
-    <link rel="canonical" href="https://trynix.dev/" />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧪</text></svg>"
-    />
-    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)" />
-
-    <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="trynix" />
-    <meta property="og:title" content="trynix — boot anything nixpkgs ever shipped, in your browser" />
-    <meta
-      property="og:description"
-      content="Pick any package from 13 years of nixpkgs history and boot it in an x86_64 Linux VM in your tab. No server anywhere."
-    />
-    <meta property="og:url" content="https://trynix.dev/" />
 
     <link rel="stylesheet" href="style.css" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+
+    <link rel="canonical" href="https://jamison.lahman.dev/tryarch/" />
+    <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0a0a0c" media="(prefers-color-scheme: dark)" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="tryarch" />
+    <meta
+      property="og:title"
+      content="tryarch — boot anything Arch Linux ever shipped, in your browser"
+    />
+    <meta
+      property="og:description"
+      content="Pick any Arch package from core, extra or the Arch Linux Archive and boot it in an x86_64 Linux VM in your tab. No server anywhere."
+    />
+    <meta property="og:url" content="https://jamison.lahman.dev/tryarch/" />
 
     <!-- GitHub Pages cannot set COOP/COEP response headers; this service
          worker injects them so SharedArrayBuffer (qemu's pthreads) works.
@@ -46,179 +47,286 @@
     <script src="vendor/fzstd.js"></script>
   </head>
   <body>
-    <header class="site">
-      <h1><a href=".">trynix</a></h1>
-      <nav class="site">
-        <a href="https://nixmultiverse.com/" title="the index trynix resolves packages against">
-          Multiverse
-        </a>
-        <a
-          href="https://fzakaria.github.io/grail/"
-          title="grail: solve version-range queries over this index"
-        >
-          Version ranges
-        </a>
-        <a href="https://omniflake.com/" title="omniflake: thousands of Nix flakes from one flake input">
-          Omniflake
-        </a>
-        <a href="https://github.com/fzakaria/trynix">GitHub</a>
-      </nav>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div>
+        <a class="mark" href="."><b>tryarch</b><span>boot any Arch package</span></a>
+        <nav>
+          <a id="nav-about" href="#about">About</a>
+          <a href="https://github.com/jmelahman/tryarch">Source</a>
+        </nav>
+      </div>
     </header>
 
-    <p>
-      <strong class="lede">Boot any package nixpkgs ever shipped, in this tab.</strong> Pick a
-      package and a version from
-      <a href="https://github.com/fzakaria/nixpkgs-multiverse">13 years of nixpkgs history</a>; its
-      closure is fetched from <a href="https://cache.nixos.org">cache.nixos.org</a> into an x86_64
-      Linux virtual machine
-      (<a href="https://github.com/ktock/qemu-wasm">QEMU compiled to WebAssembly</a>) and you get a
-      shell with the package on <code>PATH</code>.
-      <span class="claim">Nothing runs on a server.</span>
-    </p>
-
-    <p class="examples muted">
-      Try:
-      <a href="?pkg=hello">hello</a> ·
-      <a href="?pkg=ripgrep&pkg=jq">ripgrep and jq</a> ·
-      <a href="?pkg=python3@3.6.2">python 3.6.2 from 2017</a> ·
-      <a href="?pkg=jujutsu@0.43.0">jujutsu</a> ·
-      <a href="?pkg=hello@2.10&pkg=hello@2.12.2">two eras of hello at once</a> ·
-      <a href="?pkg=python3@3.10.6&pkg=openssl@1.1.1q">python 3.10 with openssl 1.1</a> ·
-      <!-- A package no public cache holds, served as a static directory
-           next to this page (site/examples/cache). The cache and the key
-           that vouches for it ride in the link, which is the whole point:
-           a store path from someone else's cache is shareable. -->
-      <a
-        href="?path=/nix/store/awmhh7ci4admi71gs6b73awh0lxgrqqn-hello-trynix-2.12.3&cache=examples/cache%20trynix-examples-1:dZOV2uGWvjHo6IC5ZqCCu0dmIRzLm9pyOQJBDnBsXRY="
-        title="a patched hello that exists in no public cache, fetched from a cache served next to this page"
-      >
-        a patched hello from another cache
-      </a>
-    </p>
-
-    <section id="pick">
-      <nav id="lanes">
-        <a class="active" href="#" data-lane="search">Search packages</a>
-        <a href="#" data-lane="ranges">Package specs</a>
-        <a href="#" data-lane="path">Store path</a>
-        <a href="#" data-lane="caches">Caches</a>
-      </nav>
-
-      <div class="lane" data-lane="search">
-        <input
-          id="search"
-          type="search"
-          spellcheck="false"
-          autocomplete="off"
-          placeholder="search nixpkgs — hello, python3, jujutsu, ripgrep…"
-        />
-        <div id="search-results"></div>
-      </div>
-
-      <div class="lane" data-lane="ranges" id="ranges-lane" hidden>
-        <form id="ranges-form">
-          <input
-            id="ranges-input"
-            type="search"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="python3@3.10.* ripgrep jujutsu@>=0.40"
-          />
-          <button type="submit">Resolve</button>
-        </form>
-        <ul id="ranges-complete" hidden></ul>
-        <p class="muted">
-          Each spec resolves on its own to the newest build that matches; the versions need not
-          have coexisted in one nixpkgs. Booted side by side, each package brings its own
-          dependencies, so a mix that never coexisted still runs.
-        </p>
-        <p id="grail-link" class="muted"></p>
-        <div id="ranges-results"></div>
-      </div>
-
-      <div class="lane" data-lane="path" hidden>
-        <form id="walk-form">
-          <input
-            id="store-path"
-            type="search"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="/nix/store/<digest>-<name>, a store basename, or a bare digest"
-          />
-          <button type="submit">Add</button>
-        </form>
-      </div>
-
-      <div class="lane" data-lane="caches" hidden>
-        <p class="muted">
-          Extra binary caches, one per line, as a URL and its public key. They go into this page's
-          link with the selection, so a store path from your cachix and the key that vouches for it
-          are one link to send. Signatures are checked against these keys as the closure is walked;
-          a cache has to allow cross-origin reads for a page to fetch from it at all.
-        </p>
-        <textarea
-          id="caches-input"
-          rows="6"
-          spellcheck="false"
-          placeholder="https://example.cachix.org example.cachix.org-1:base64key="
-        ></textarea>
-        <p id="caches-status" class="muted"></p>
-      </div>
-
-      <div id="selection"></div>
-      <p id="status" class="muted"></p>
-      <p class="actions">
-        <button type="button" id="boot-button" disabled>Boot</button>
-        <a href="#" id="reboot-link" class="muted" hidden>
-          or start over in a fresh VM
-        </a>
-      </p>
-      <p id="add-note" class="muted" hidden>
-        Packages added to a running VM appear in the shell straight away; the most recently added
-        one wins when two provide the same command. A command the shell has already run once is
-        remembered at its old path until <code>hash -r</code>.
-      </p>
-    </section>
-
-    <section id="boot" hidden>
-      <h2>Boot</h2>
-      <div id="boot-progress"></div>
-      <div id="console">
-        <div id="console-bar">
-          <span>ttyS0</span>
-          <span title="libghostty-vt, compiled to wasm">ghostty</span>
+    <main id="main">
+      <section class="row hero">
+        <div class="tag">tryarch</div>
+        <div>
+          <h1>Boot anything Arch Linux ever shipped, in your browser</h1>
+          <p class="lede">
+            A real x86_64 Linux guest runs in this tab —
+            <a href="https://github.com/ktock/qemu-wasm">QEMU compiled to WebAssembly</a>, with
+            nothing on a server. Pick official Arch packages from
+            <span class="repo repo-core">core</span> and
+            <span class="repo repo-extra">extra</span>, or an older version from the
+            <a href="https://archive.org/details/archlinuxarchive">Arch Linux Archive</a> on
+            archive.org, and you get a shell with them on <code>PATH</code>. Every version links
+            to the PKGBUILD it was built from.
+          </p>
+          <p class="eyebrow">Try</p>
+          <ul id="examples">
+            <li><a href="?pkg=jq&amp;boot=1">jq</a></li>
+            <li><a href="?pkg=jq@1.5-1&amp;boot=1">jq 1.5, from 2015</a></li>
+            <li><a href="?pkg=python&amp;boot=1">python</a></li>
+            <li><a href="?pkg=vim&amp;boot=1">vim</a></li>
+            <li><a href="?pkg=bash@5.1.016-1&amp;boot=1">bash 5.1.016-1</a></li>
+          </ul>
         </div>
-        <div id="console-body">
-          <div id="console-veil"><span class="spinner"></span><span id="console-note"></span></div>
-          <div id="terminal"></div>
+      </section>
+
+      <section class="row" id="pick">
+        <div class="tag">Pick</div>
+        <div>
+          <div id="lanes" role="tablist" aria-label="How to choose packages">
+            <button
+              type="button"
+              id="tab-search"
+              data-lane="search"
+              role="tab"
+              aria-selected="true"
+              aria-controls="lane-search"
+            >
+              Search
+            </button>
+            <button
+              type="button"
+              id="tab-specs"
+              data-lane="specs"
+              role="tab"
+              aria-selected="false"
+              aria-controls="lane-specs"
+            >
+              Specs
+            </button>
+            <button
+              type="button"
+              id="tab-repos"
+              data-lane="repos"
+              role="tab"
+              aria-selected="false"
+              aria-controls="lane-repos"
+            >
+              Repositories
+            </button>
+          </div>
+
+          <div
+            class="lane"
+            id="lane-search"
+            data-lane="search"
+            role="tabpanel"
+            aria-labelledby="tab-search"
+          >
+            <input
+              id="search"
+              type="search"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="package name…"
+            />
+            <p class="hint">
+              Every package name in core and extra for x86_64, from the repository databases.
+            </p>
+            <div id="search-results" role="listbox" aria-label="Search results"></div>
+          </div>
+
+          <div
+            class="lane"
+            id="lane-specs"
+            data-lane="specs"
+            role="tabpanel"
+            aria-labelledby="tab-specs"
+            hidden
+          >
+            <form id="specs-form">
+              <input
+                id="specs-input"
+                type="search"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="jq@>=1.6 python@3.12.* bash@5.2.026-2"
+              />
+              <button type="submit">Resolve</button>
+            </form>
+            <div id="specs-complete" hidden></div>
+            <p class="hint">
+              One spec per package, each resolved on its own to the newest version that matches;
+              pacman's own form (<code>jq&gt;=1.6</code>) works too. Versions that never shipped
+              together still boot together — each package brings its own dependencies.
+            </p>
+            <div id="specs-results"></div>
+          </div>
+
+          <div
+            class="lane"
+            id="lane-repos"
+            data-lane="repos"
+            role="tabpanel"
+            aria-labelledby="tab-repos"
+            hidden
+          >
+            <textarea
+              id="repos-input"
+              rows="3"
+              spellcheck="false"
+              placeholder="https://…/repo.db, one per line"
+            ></textarea>
+            <p class="hint">
+              Any pacman repository database whose host allows cross-origin reads. Its packages
+              win over the official repos, and the URLs ride in this page's link with the
+              selection.
+            </p>
+            <div id="repos-status"></div>
+            <p class="note">
+              example:
+              <a id="example-repo-link" href="?repo=examples/repo/hello-tryarch.db&amp;pkg=hello-tryarch"
+                >hello-tryarch</a
+              >, a one-file package served next to this page.
+            </p>
+          </div>
+
+          <div id="selection"></div>
+          <p id="status"></p>
+          <p class="actions">
+            <button type="button" id="boot-button" disabled>Boot</button>
+            <a href="#" id="reboot-link" hidden>reboot with this selection</a>
+          </p>
+          <p id="add-note" class="note" hidden>
+            Packages added to a running VM appear in the shell straight away; when two provide
+            the same command, the one written first wins — a file already in the share is never
+            overwritten. A command the shell has already run once is remembered at its old path
+            until <code>hash -r</code>.
+          </p>
         </div>
-        <!-- The keys a phone's keyboard lacks; shown on touch devices
-             only (site/js/keybar.js fills it). -->
-        <div id="keybar" aria-label="terminal keys"></div>
+      </section>
+
+      <section class="row" id="boot" hidden>
+        <div class="tag">Boot</div>
+        <div>
+          <div id="boot-progress"></div>
+          <div id="console">
+            <div id="console-bar">
+              <span id="console-title">ttyS0</span>
+              <span id="console-hint" title="libghostty-vt, compiled to wasm">ghostty</span>
+            </div>
+            <div id="console-body">
+              <div id="console-veil">
+                <span class="spinner"></span><span id="console-note"></span>
+              </div>
+              <div id="terminal"></div>
+            </div>
+            <!-- The keys a phone's keyboard lacks; shown on touch devices
+                 only (site/js/keybar.js fills it). -->
+            <div id="keybar" aria-label="terminal keys"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="row" id="debug-row">
+        <div class="tag">Debug</div>
+        <div>
+          <details id="debug">
+            <summary>Report</summary>
+            <div>
+              <p class="debug-actions">
+                <button type="button" id="copy-report">Copy report</button>
+                what was served, the browser, this boot's log and the last lines of the console —
+                for an issue on GitHub
+                <span id="report-status"></span>
+              </p>
+              <pre id="debug-log"></pre>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <div id="result" aria-live="polite"></div>
+
+      <section class="row" id="about">
+        <div class="tag">About</div>
+        <div>
+          <h2>How it works</h2>
+          <p>
+            The page fetches a kernel, an initramfs and a resumable QEMU snapshot, then runs
+            qemu-wasm in a worker. The packages you pick are downloaded and unpacked into the
+            browser's own in-memory filesystem and handed to the guest over virtio-9p as
+            <code>/share</code>, which the guest's init dresses up as an Arch root —
+            <code>/usr</code>, <code>/lib</code>, <code>/etc</code> and a shell on
+            <code>PATH</code>. Resuming the snapshot skips the kernel's start-up, so the prompt
+            arrives in seconds rather than a minute.
+          </p>
+
+          <h2>Where the bytes come from</h2>
+          <p>
+            Current packages come from the five Arch mirrors that allow cross-origin reads —
+            <code>mirror.lcarilla.de</code>, <code>archlinux.mailtunnel.eu</code>,
+            <code>repo.c48.uk</code>, <code>mirror.iusearchbtw.nl</code> and
+            <code>yonderly.org</code> — tried in that order, with the repository database from
+            the same place. Older versions come from the Internet Archive's mirror of the Arch
+            Linux Archive, one item per package name, read through archive.org's CORS endpoint.
+          </p>
+          <p class="note note-alert">
+            That mirror stops around <b>October 2024</b>. A version that was still current then,
+            or older, is there; a version that came and went after that date is not, and
+            <code>archive.archlinux.org</code> — which does have it — sends no CORS headers, so
+            no page can read it. Those versions are missing from the version list altogether,
+            not listed and unbootable: the list is what the archive holds, plus whatever is
+            current now.
+          </p>
+
+          <h2>What is checked</h2>
+          <p>
+            A package from a mirror is verified against the SHA-256 in the repository database; a
+            package from archive.org against the SHA-1 in its metadata. PGP signatures are
+            <b>not</b> checked — the database and the package come from the same host, so the
+            hash proves the transfer, not the packager. What runs is a guest in your tab with no
+            network and no access to your machine, which is what makes that a reasonable trade
+            here and not in a package manager.
+          </p>
+
+          <h2>Limits</h2>
+          <ul>
+            <li>
+              <code>.INSTALL</code> scriptlets are never run, so a package that needs
+              post-install work (users, caches, systemd units) arrives unconfigured.
+            </li>
+            <li>
+              Only packages present at boot get their <code>/etc</code> copied into the guest;
+              anything added later keeps its files under <code>/share/etc</code>.
+            </li>
+            <li>
+              AUR packages are recipes, not binaries — there is nothing to fetch, so they cannot
+              be booted. <a href="https://jamison.lahman.dev/pkglint/">pkglint</a> grades those
+              instead.
+            </li>
+            <li>multilib is skipped; only <code>x86_64</code> and <code>any</code> packages.</li>
+            <li>
+              The unpacked tree lives in memory: about 1.2 GB of files at most, with 512 MB of
+              RAM in the guest.
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div>
+        <span id="index-info"></span>
+        <span>made by <a href="https://jamison.lahman.dev">Jamison Lahman</a></span>
+        <span>based on <a href="https://trynix.dev">trynix</a> by Farid Zakaria</span>
+        <span><a href="https://github.com/jmelahman/tryarch">GitHub</a></span>
       </div>
-    </section>
-
-    <details id="debug">
-      <summary class="muted">Debug log</summary>
-      <p class="debug-actions muted">
-        <button type="button" id="copy-report">Copy report</button>
-        what was served, the browser, this boot's log and the last lines of the console — for an
-        issue on GitHub
-        <span id="report-status"></span>
-      </p>
-      <pre id="debug-log"></pre>
-    </details>
-
-    <section>
-      <div id="result"></div>
-    </section>
-
-    <footer class="muted">
-      Made with ❤️ by
-      <a href="https://fzakaria.com">Farid Zakaria</a>
-      ·
-      <a href="https://github.com/fzakaria/trynix/blob/main/LICENSE">MIT</a>
-      <div id="store" hidden><code id="store-path-footer"></code></div>
     </footer>
 
     <script type="module" src="js/app.js"></script>

@@ -1,0 +1,82 @@
+#!/bin/sh
+# trynix guest init: bring up the pseudo-filesystems, mount the 9p store
+# share the page populated, apply its manifest, and hand the serial
+# console a shell. The share layout is the page's contract:
+#   /share/nix/store/...   the fetched closure
+#   /share/manifest        shell fragment: PATH and friends
+#
+# The mount point is /share to match the directory the page builds in
+# the emscripten filesystem, and that is load-bearing rather than
+# cosmetic. emscripten's FS.readlink resolves a symlink against its
+# parent and returns an absolute path, so every relative symlink in a
+# NAR — libruby-3.4.9.so.3.4 -> libruby-3.4.9.so.3.4.9, and thousands
+# like it — reaches the guest rewritten as /share/nix/store/... . That
+# resolves only if the guest agrees with the host about where /share
+# is. Mounting anywhere else leaves those links dangling and the
+# packages that need them failing to load their own libraries.
+export PATH=/bin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+# Block until the page says the share is populated, then mount it.
+#
+# This read is where the migration snapshot is taken (see
+# docs/design.md): the snapshotting VM boots with an empty share and
+# parks here, so one snapshot serves every package selection — the
+# selection arrives later, in whatever share the resuming page built.
+#
+# Waiting must happen with nothing mounted. QEMU refuses to migrate a
+# VM that has a virtfs export mounted ("Migration is disabled when
+# VirtFS export path ... is mounted in the guest"), so a poll loop that
+# mounted to look would make the snapshot impossible to take. Mounting
+# strictly after the handshake also means the first mount always sees
+# the finished share, with no chance of a cached empty lookup.
+# Name the clocksource the kernel settled on. Calibrating the TSC
+# against the PIT sometimes fails under emulation, and the fallback
+# (refined-jiffies, 10 ms) pushes clock_gettime out of the vDSO into a
+# real syscall for the life of the VM. The snapshot freezes whichever
+# one this boot picked, so tools/make-snapshot.py reads this line and
+# refuses to publish a boot that lost the TSC. The kernel's own
+# messages cannot serve: loglevel=4 keeps them off the console.
+echo "trynix: clocksource $(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)"
+
+echo "trynix: waiting for the store"
+read -r _handshake
+
+# cache=loose keeps the share's dentries, inodes and page cache in the
+# guest. Without it 9p runs as cache=none: a dentry is dropped the
+# moment nothing holds it and every lookup allocates a fresh inode, so
+# the page cache of a mapped library dies with the process that mapped
+# it, and the next exec walks every path component and reads glibc
+# over the wire all over again. Each round trip is a synchronous hop
+# through emscripten's proxied syscalls, which is where ruby's start-up
+# time went. The store is immutable, so nothing cached can go stale;
+# the paths and links the page adds later are names the guest has
+# never looked up, and 9p drops negative dentries in this mode, so a
+# name that was missing once is looked up again.
+# Throw away the randomness this snapshot was frozen with, before
+# anything can consume it. Every visitor resumes these same bytes, and
+# only a reseed pulls fresh ones from the CPU instruction QEMU answers
+# out of the browser. guest/src/reseed.c has the detail; it is the first
+# thing done after the handshake so that nothing -- not the shell's
+# $RANDOM, not a uuid, not a key -- is generated from shared state.
+reseed || echo "trynix: warning: could not reseed the random pool"
+
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576,cache=loose store0 /share
+ln -s /share/nix /nix
+if [ -f /share/manifest ]; then
+  . /share/manifest
+fi
+
+echo
+echo "trynix: welcome to the multiverse"
+echo
+
+# setsid -c starts the shell in a new session with the console as its
+# controlling terminal, so Ctrl-C and job control work. If that is
+# unavailable, fall back to a plain shell on the console — no job
+# control, but it still boots rather than panicking init.
+setsid -c /bin/sh
+exec /bin/sh

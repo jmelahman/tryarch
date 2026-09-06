@@ -5,7 +5,7 @@ Everything else in the tree checks that the pieces are the right bytes.
 Nothing checked the one thing a reader actually does: open the page and
 wait for a shell. Two separate bugs shipped through that gap, both of
 them a guest that never reaches its prompt while the page waits out its
-handshake timeout, and both invisible to `nix flake check`.
+handshake timeout, and both invisible to the CI workflow.
 
 Cold boots only, one fresh browser profile each, because the failures
 were races in the resume handshake and a warm profile hides them. The
@@ -13,11 +13,13 @@ run fails if any boot takes longer than --limit, which is set well
 under the page's own timeout so a hang shows up as a failure rather
 than a slow pass.
 
-    nix run .#boot-test                     # the site this tree builds
-    nix run .#boot-test -- --runs 20
-    nix run .#boot-test -- --url https://trynix.dev/
+    python3 tools/boot-test.py --site _site
+    python3 tools/boot-test.py --site _site --runs 20
+    python3 tools/boot-test.py --url 'https://jamison.lahman.dev/tryarch/?pkg=jq&boot=1'
 
-A boot needs the network: the closure comes from cache.nixos.org.
+Needs `pip install websocket-client` and a headless browser: whatever
+TRYARCH_BROWSER names, or chromium on PATH. A boot needs the network
+too, since the package comes from an Arch mirror.
 """
 
 import argparse
@@ -37,9 +39,22 @@ import urllib.request
 import websocket
 
 # What init prints once it has mounted the share and is about to hand
-# over the shell. This is the whole test: the page is only useful once
+# over the shell. This is half the test: the page is only useful once
 # this appears.
+#
+# The wording is the guest's, and the guest is trynix's, unchanged:
+# it lives inside the published snapshot, so renaming the string means
+# rebuilding the initramfs and retaking the snapshot (docs/engine.md).
 READY_MARKER = "welcome to the multiverse"
+
+# The other half. A shell prompt proves the VM resumed; it proves
+# nothing about the share, since init prints the marker before anything
+# from a package has run. So the test types this at the prompt and
+# waits for the answer: `jq --version` prints "jq-1.7.1", and that dash
+# is a program that came off an Arch mirror, was unpacked into MEMFS,
+# reached the guest over 9p and executed.
+CHECK_COMMAND = "jq --version\n"
+CHECK_OUTPUT = "jq-"
 
 # The page gives the guest 180 s before it gives up, so a boot that is
 # going to hang hangs for that long. Anything over this is a failure,
@@ -48,8 +63,8 @@ DEFAULT_LIMIT_SECONDS = 30
 DEFAULT_RUNS = 10
 
 # The package to boot. Small on purpose: this measures whether the guest
-# comes up, not how fast a closure downloads.
-DEFAULT_PACKAGE = "hello"
+# comes up, not how fast a package downloads.
+DEFAULT_PACKAGE = "jq"
 
 POLL_SECONDS = 0.15
 
@@ -182,21 +197,45 @@ class Browser:
         shutil.rmtree(self.profile, ignore_errors=True)
 
 
-def boot_once(binary, url, limit, workdir, index):
-    """Time one cold boot; returns seconds, or None if it never arrived."""
+def wait_for(browser, marker, deadline):
+    """Poll the guest's transcript until `marker` shows up in it."""
+    while time.monotonic() < deadline:
+        transcript = browser.evaluate(
+            "(window.tryarch && window.tryarch.transcript "
+            "&& window.tryarch.transcript()) || ''"
+        )
+        if transcript and marker in transcript:
+            return True
+        time.sleep(POLL_SECONDS)
+    return False
+
+
+def boot_once(binary, url, limit, workdir, index, check):
+    """One cold boot: returns (seconds to the shell, None), or (None, why).
+
+    The clock stops at the shell; running `check` afterwards has to fit
+    in the same budget but is not part of the time, since it measures
+    the guest's speed rather than the page's.
+    """
     browser = Browser(binary, os.path.join(workdir, f"profile-{index}"))
     try:
         started = time.monotonic()
+        deadline = started + limit
         browser.send("Page.navigate", url=url)
-        while time.monotonic() - started < limit:
-            transcript = browser.evaluate(
-                "(window.trynix && window.trynix.transcript "
-                "&& window.trynix.transcript()) || ''"
+        if not wait_for(browser, READY_MARKER, deadline):
+            return None, f"NO SHELL within {limit:g}s"
+        taken = time.monotonic() - started
+
+        if check:
+            command, expected = check
+            # Typed the way a keystroke is, through the line discipline
+            # the terminal feeds — the same call site/js/boot.js makes.
+            browser.evaluate(
+                f"window.tryarch.master.ldisc.writeFromLower({json.dumps(command)})"
             )
-            if transcript and READY_MARKER in transcript:
-                return time.monotonic() - started
-            time.sleep(POLL_SECONDS)
-        return None
+            if not wait_for(browser, expected, deadline):
+                return None, f"shell in {taken:.1f}s, but {command.strip()!r} said nothing"
+        return taken, None
     finally:
         browser.close()
 
@@ -210,7 +249,7 @@ def main():
     parser.add_argument("--limit", type=float, default=DEFAULT_LIMIT_SECONDS)
     parser.add_argument(
         "--browser",
-        default=os.environ.get("TRYNIX_BROWSER", "chromium"),
+        default=os.environ.get("TRYARCH_BROWSER", "chromium"),
         help="the headless browser to drive",
     )
     args = parser.parse_args()
@@ -225,18 +264,26 @@ def main():
         base, shutdown = serve(args.site)
         url = f"{base}/?pkg={args.package}&boot=1"
 
+    # Only jq's own output is known here, so a different --package is
+    # booted but not asked to run anything.
+    check = (CHECK_COMMAND, CHECK_OUTPUT) if args.package == DEFAULT_PACKAGE else None
+
     print(f"booting {url}", flush=True)
     print(f"{args.runs} cold boots, each must reach a shell within {args.limit:g}s", flush=True)
+    if check:
+        print(f"and answer {check[0].strip()!r} with {check[1]!r}", flush=True)
 
     times = []
     stalls = 0
     with tempfile.TemporaryDirectory() as workdir:
         try:
             for index in range(args.runs):
-                taken = boot_once(args.browser, url, args.limit, workdir, index)
-                if taken is None:
+                taken, problem = boot_once(
+                    args.browser, url, args.limit, workdir, index, check
+                )
+                if problem:
                     stalls += 1
-                    print(f"  boot {index + 1}: NO SHELL within {args.limit:g}s", flush=True)
+                    print(f"  boot {index + 1}: {problem}", flush=True)
                 else:
                     times.append(taken)
                     print(f"  boot {index + 1}: {taken:.1f}s", flush=True)
@@ -248,11 +295,11 @@ def main():
         times.sort()
         print(
             f"median {times[len(times) // 2]:.1f}s, "
-            f"slowest {times[-1]:.1f}s, {stalls} of {args.runs} never reached a shell"
+            f"slowest {times[-1]:.1f}s, {stalls} of {args.runs} never got there"
         )
     if stalls:
-        sys.exit(f"{stalls} of {args.runs} boots never reached a shell")
-    print("every boot reached a shell")
+        sys.exit(f"{stalls} of {args.runs} boots did not come up")
+    print("every boot reached a shell and ran the package")
 
 
 if __name__ == "__main__":

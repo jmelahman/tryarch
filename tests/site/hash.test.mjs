@@ -1,47 +1,107 @@
-// Tests nix's base32 hash encoding, which narinfos use for FileHash and
-// NarHash: nix's own alphabet, and the digits taken from the end of the
-// string upwards, five bits each. The vector is sha256("hello"), with
-// the base32 form produced by `nix hash convert`.
+// Tests the digest check. Node has the same SubtleCrypto the browser
+// does, so the vectors here are the real thing; the interesting cases
+// are the three ways of answering "I could not check that", which the
+// caller must not confuse with "that is wrong".
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { decodeNixBase32, parseHash } from "../../site/js/hash.js";
+import { verifyDigest } from "../../site/js/hash.js";
 
-const HELLO_HEX =
-  "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-const HELLO_NIX32 = "094qif9n4cq4fdg459qzbhg1c6wywawwaaivx0k0x8xhbyx4vwic";
+const bytes = new TextEncoder().encode("abc");
 
-const hex = (bytes) =>
-  [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+const SHA256 =
+  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+const SHA1 = "a9993e364706816aba3e25717850c26c9cd0d89d";
 
-test("nix base32 decodes to the bytes nix hashed", () => {
-  assert.equal(hex(decodeNixBase32(HELLO_NIX32, 32)), HELLO_HEX);
+test("a matching digest verifies", async () => {
+  assert.equal(
+    await verifyDigest(bytes, { algorithm: "SHA-256", hex: SHA256 }),
+    true,
+  );
+  // The Internet Archive vouches for its copies with sha1, so both have
+  // to work off the same call.
+  assert.equal(
+    await verifyDigest(bytes, { algorithm: "SHA-1", hex: SHA1 }),
+    true,
+  );
 });
 
-test("a narinfo hash field names its algorithm", () => {
-  const parsed = parseHash(`sha256:${HELLO_NIX32}`);
-  assert.equal(parsed.algorithm, "sha256");
-  assert.equal(hex(parsed.bytes), HELLO_HEX);
+test("the hex comparison ignores case", async () => {
+  assert.equal(
+    await verifyDigest(bytes, {
+      algorithm: "SHA-256",
+      hex: SHA256.toUpperCase(),
+    }),
+    true,
+  );
 });
 
-test("a character outside nix's alphabet is rejected", () => {
-  assert.throws(() => decodeNixBase32("e".repeat(52), 32));
+test("a wrong digest fails", async () => {
+  assert.equal(
+    await verifyDigest(bytes, {
+      algorithm: "SHA-256",
+      hex: SHA256.replace(/.$/, "0"),
+    }),
+    false,
+  );
+  assert.equal(
+    await verifyDigest(new TextEncoder().encode("abd"), {
+      algorithm: "SHA-256",
+      hex: SHA256,
+    }),
+    false,
+  );
 });
 
-// Tests the encodings other caches write. cache.nixos.org writes nix
-// base32; cachix writes FileHash in hex, and nix itself will also emit
-// base64. Each is told apart by its length, the way nix does it, and
-// each has to decode to the same bytes.
-const HELLO_BASE64 = "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=";
-
-test("a hex hash, as cachix writes FileHash, decodes", () => {
-  assert.equal(hex(parseHash(`sha256:${HELLO_HEX}`).bytes), HELLO_HEX);
+test("a digest of the wrong length fails rather than throwing", async () => {
+  assert.equal(
+    await verifyDigest(bytes, { algorithm: "SHA-256", hex: "ba78" }),
+    false,
+  );
 });
 
-test("a base64 hash decodes", () => {
-  assert.equal(hex(parseHash(`sha256:${HELLO_BASE64}`).bytes), HELLO_HEX);
+test("no digest is not an answer", async () => {
+  assert.equal(await verifyDigest(bytes, null), null);
+  assert.equal(await verifyDigest(bytes, undefined), null);
+  assert.equal(
+    await verifyDigest(bytes, { algorithm: "SHA-256", hex: "" }),
+    null,
+  );
+  assert.equal(
+    await verifyDigest(bytes, { algorithm: "SHA-256", hex: null }),
+    null,
+  );
 });
 
-test("a hash of no recognised length is rejected", () => {
-  assert.throws(() => parseHash("sha256:abc"));
+test("an algorithm this runtime will not hash is not an answer", async () => {
+  assert.equal(
+    await verifyDigest(bytes, {
+      algorithm: "MD5",
+      hex: "900150983cd24fb0d6963f7d28e17f72",
+    }),
+    null,
+  );
+});
+
+test("no SubtleCrypto is not an answer", async () => {
+  const original = globalThis.crypto;
+  // A page served over plain HTTP gets no crypto.subtle, and a boot
+  // there must still be possible — just unverified.
+  Object.defineProperty(globalThis, "crypto", {
+    value: {},
+    configurable: true,
+    writable: true,
+  });
+  try {
+    assert.equal(
+      await verifyDigest(bytes, { algorithm: "SHA-256", hex: SHA256 }),
+      null,
+    );
+  } finally {
+    Object.defineProperty(globalThis, "crypto", {
+      value: original,
+      configurable: true,
+      writable: true,
+    });
+  }
 });

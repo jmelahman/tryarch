@@ -1,101 +1,83 @@
 // Assembling the emscripten Module and starting the VM.
 //
-// The VM is started in two steps, so the closure can stream into the
-// store share while the engine is still being compiled:
+// The VM is started in two steps, so packages can stream into the
+// share while the engine is still being compiled:
 //
 //   startVM   instantiates the engine — the guest image and the
 //             snapshot go into MEMFS, QEMU's main() is held back with
 //             a run dependency, and the share is open for writing;
-//   vm.run    links the programs, releases QEMU, and hands the guest
+//   vm.run    writes the manifest, releases QEMU, and hands the guest
 //             its handshake.
 //
-// Between the two the page writes each NAR as it arrives, and nothing
-// is ever held for the whole closure at once.
+// Between the two the page writes each package as it arrives, and
+// nothing is ever held for the whole closure at once.
 //
 // xterm-pty is a vendored UMD script, so openpty is a global; the
 // terminal itself comes from terminal.js.
 /* global openpty */
 
-import {
-  ensureDir,
-  linkPrograms,
-  Precedence,
-  programsOf,
-  writeEntries,
-} from "./store.js";
+import { ensureDir, programsOf, SHARE_ROOT, writePackage } from "./share.js";
 import { openTerminal } from "./terminal.js";
 import { log } from "./log.js";
 
 // The guest sees: -L /pack (BIOS, kernel, initramfs) and the 9p share
-// /share the init script mounts (tag store0, matching nix/guest/init).
+// /share the init script mounts (tag store0, matching guest/src/init).
 const PACK_DIR = "/pack";
-const SHARE_DIR = "/share";
-const STORE_DIR = `${SHARE_DIR}/nix/store`;
+const SHARE_DIR = SHARE_ROOT;
 
-// The farm: one directory of symlinks, one per program in the closure,
-// that the guest keeps on PATH for the life of the VM. Adding a package
-// later means adding links here, which the guest sees through 9p the
-// moment they exist — nothing has to be typed at its shell, and PATH
-// never grows past two entries.
-const BIN_DIR = `${SHARE_DIR}/bin`;
-const GUEST_BIN_DIR = BIN_DIR;
-const GUEST_STORE_DIR = "/nix/store";
+// The share is laid out like an Arch root: every package is unpacked
+// straight into it, so /share/usr/bin/jq is where jq lands and two
+// packages that both ship /usr/lib merge there, the way they do on a
+// real system (pacman refuses a file conflict, so nothing is lost by
+// first-writer-wins). The directories the manifest links exist before
+// anything is written, so the links resolve even when no package
+// filled them.
+const SHARE_DIRS = ["usr/bin", "usr/lib", "etc"];
 
-// The shell fragment the guest init sources. PATH, and deliberately
-// nothing else.
+// The shell fragment the guest init sources.
 //
-// An LD_LIBRARY_PATH covering the closure looks helpful and is
-// actively harmful here. Every nix binary already names its own
-// interpreter in PT_INTERP and its own libraries in DT_RUNPATH, by
-// absolute store path — that is what makes two eras able to share a
-// machine at all. But the loader searches LD_LIBRARY_PATH *before*
-// DT_RUNPATH, so setting it overrides all of that and hands each
-// binary whichever copy of a library happens to come first.
+// The guest image is a static busybox initramfs with no /usr, /lib or
+// /lib64 of its own — it is the same image trynix boots, kept
+// byte-identical because the resumable snapshot is taken from it. So
+// the Arch root is grafted on at the top: /usr, /lib and /lib64 become
+// links into the share, which is where the dynamic loader
+// (/lib64/ld-linux-x86-64.so.2 in every Arch binary's PT_INTERP) and
+// the libraries under /usr/lib are found. /etc is copied rather than
+// linked, since the initramfs already has one, and busybox's `cp -a`
+// carries the packages' symlinks over as they are.
 //
-// Booting ripgrep beside lolcat is where that shows: their closures
-// carry glibc 2.42 and 2.30, and the mix died on
-// "ld-linux-x86-64.so.2: version `GLIBC_2.35' not found (required by
-// glibc-2.42/libc.so.6)" — the older loader, handed the newer libc.
-// With nothing set, each binary loads its own and they coexist.
+// PATH puts the packages' /usr/bin ahead of busybox's /bin, so a
+// package's coreutils shadow busybox's, and what is not installed still
+// works. HOME is /root because bash and friends write their history
+// there.
 //
 // The console is a serial line, and a serial tty has no window size
 // until something sets one: TIOCGWINSZ answers 0x0, and a full-screen
-// program (btop: "Failed to get size of terminal!") refuses to start.
-// The browser's resize events reach the line discipline and stop
-// there; nothing carries them into a 16550. `resize` is how a serial
-// console has always learned its size — it parks the cursor in the
-// far corner, asks the terminal where that landed, and sets the tty
-// from the answer — and ghostty answers it. The handshake's spare
-// newlines (see resume) are still queued on the tty at this point and
-// would be read as that answer, so they are drained first: with
-// canonical mode off and a 0.2 s read timeout, `cat` takes what is
-// queued and gets end-of-file when nothing more comes. (busybox's
-// `read -t` takes whole seconds only, and a whole second is too long
-// to wait at every boot.)
+// program refuses to start. The browser's resize events reach the line
+// discipline and stop there; nothing carries them into a 16550. The
+// page already knows the size it laid the terminal out at, so it
+// states it, rather than running `resize` and waiting on a reply that
+// may never come.
 //
 // TERM is xterm-256color rather than ghostty's own xterm-ghostty: the
 // guest's programs look the name up in the terminfo their own ncurses
-// carries, and only very recent ncurses knows ghostty's, while every
-// era knows xterm-256color — which is the fallback ghostty's docs give
-// for a machine without its terminfo. LANG=C.UTF-8 is built into glibc
-// since 2.35, so programs that insist on a UTF-8 locale (btop) get
-// one; a closure old enough to lack it falls back to C, and perl says
-// so.
+// carries, and every era knows xterm-256color. LANG=C.UTF-8 is built
+// into glibc since 2.35, so programs that insist on a UTF-8 locale get
+// one; an older glibc falls back to C.
 function manifest({ rows, cols }) {
   return [
-    `export PATH="${GUEST_BIN_DIR}:$PATH"`,
+    `ln -s ${SHARE_DIR}/usr /usr`,
+    `ln -s ${SHARE_DIR}/usr/lib /lib`,
+    `ln -s ${SHARE_DIR}/usr/lib /lib64`,
+    `ln -s ${SHARE_DIR}/opt /opt`,
+    `ln -s ${SHARE_DIR}/var /var`,
+    `ln -s ${SHARE_DIR}/srv /srv`,
+    "mkdir -p /root /home /run /tmp",
+    `[ -d ${SHARE_DIR}/etc ] && cp -a ${SHARE_DIR}/etc/. /etc/`,
+    "export PATH=/usr/bin:/bin",
+    "export HOME=/root",
     "export TERM=xterm-256color",
     "export LANG=C.UTF-8",
-    // Tell the tty how big it is, rather than asking the terminal.
-    //
-    // A serial console has no window size until something sets one:
-    // TIOCGWINSZ answers 0x0 and a full-screen program refuses to start.
-    // `resize` is the traditional answer, but it asks the terminal where
-    // the cursor is and then blocks reading the reply, and nothing
-    // guarantees a reply comes back. When none did, init hung here --
-    // before it printed the line the page waits for -- and the boot sat
-    // out the page's whole handshake timeout. The page already knows the
-    // size it laid the terminal out at, so it states it instead.
     `stty rows ${rows} cols ${cols}`,
     // Later sizes arrive the same way, through the share: the page
     // writes winsize.1, winsize.2, ... as the terminal is resized (a
@@ -114,6 +96,7 @@ function manifest({ rows, cols }) {
     "(n=1; while :; do f=/share/winsize.$n;" +
       ' if [ -r "$f" ]; then read -r r c < "$f"; stty rows "$r" cols "$c" < /dev/console; n=$((n+1));' +
       " else read -r -t 1 _ <> /tmp/tick; fi; done) &",
+    "cd /root",
     "",
   ].join("\n");
 }
@@ -124,10 +107,12 @@ const WINSIZE_FILE = `${SHARE_DIR}/winsize`;
 const SNAPSHOT_FILE = `${PACK_DIR}/vm.state`;
 
 // What holds QEMU's main() back until the share is complete.
-const STORE_DEPENDENCY = "trynix-store";
+const SHARE_DEPENDENCY = "tryarch-share";
 
 // What init prints when it is parked waiting for the share, and how
-// long the page will watch for it.
+// long the page will watch for it. The strings are the guest's, and
+// the guest is trynix's, unchanged (docs/design.md says why): renaming
+// them means a new initramfs and a new snapshot.
 const READY_MARKER = "trynix: waiting for the store";
 const MOUNTED_MARKER = "trynix: welcome to the multiverse";
 
@@ -151,7 +136,7 @@ const HANDSHAKE_TIMEOUT_MS = 180000;
 const OWN = { canOwn: true };
 
 // QEMU's arguments, from the machine definition the guest image
-// carries (nix/guest/machine.json). The snapshot tool starts QEMU from
+// carries (guest/machine.json). The snapshot tool starts QEMU from
 // the same file, which is what keeps the two ends of the migration
 // identical, device for device.
 function qemuArgs(machine) {
@@ -161,55 +146,33 @@ function qemuArgs(machine) {
   );
 }
 
-// The store share, as the page maintains it: which paths have been
-// written, what programs each one offers, and the farm of links.
-function storeShare(FS) {
+// The share, as the page maintains it: which packages have been
+// written and what programs each one offers.
+function packageShare(FS) {
   const programs = new Map();
+  const state = { written: new Set() };
 
   return {
-    // Materialise one parsed NAR. A path already there is left alone —
-    // a store path is immutable, so there is nothing to update.
-    write(basename, entries) {
-      if (programs.has(basename)) {
+    // Materialise one fetched package (pkg.js). A name already there is
+    // left alone: one version of a package is what the guest has, the
+    // way pacman keeps one.
+    write(pkg) {
+      const { name } = pkg.build;
+      if (programs.has(name)) {
         return;
       }
-      writeEntries(FS, `${STORE_DIR}/${basename}`, entries);
-      programs.set(basename, programsOf(entries));
+      const written = writePackage(FS, SHARE_DIR, pkg.entries, state);
+      programs.set(name, programsOf(pkg.entries));
+      return written;
     },
 
-    // Offer a written path's programs in the farm.
-    link(basename, precedence) {
-      linkPrograms(
-        FS,
-        BIN_DIR,
-        `${GUEST_STORE_DIR}/${basename}`,
-        programs.get(basename) ?? [],
-        precedence,
-      );
-    },
-
-    // Link a batch: the roots — what the reader asked for — first, so
-    // they win a collision, then the rest only where a name is still
-    // free, so a dependency never shadows a selection. `precedence`
-    // says whether a root may replace a link an earlier batch made.
-    linkAll(basenames, roots, precedence) {
-      for (const basename of roots) {
-        this.link(basename, precedence);
-      }
-      for (const basename of basenames) {
-        if (!roots.includes(basename)) {
-          this.link(basename, Precedence.KEEP);
-        }
-      }
-    },
-
-    programsOf: (basename) => programs.get(basename) ?? [],
+    programsOf: (name) => programs.get(name) ?? [],
     written: () => [...programs.keys()],
   };
 }
 
 // guestFiles: Map of name -> Uint8Array (bzImage, initramfs, BIOS).
-// machine: the parsed machine definition (nix/guest/machine.json).
+// machine: the parsed machine definition (guest/machine.json).
 // snapshot: the migration stream, or null to cold-boot.
 // engine: { main, locate } — the versioned URL of the emscripten
 // module, and a resolver for whatever else it asks for by name. The
@@ -235,7 +198,7 @@ export async function startVM({
   const console_ = watchConsole(master);
 
   // Resuming a snapshot skips the whole boot — BIOS, kernel, device
-  // probe — and lands in a guest already spinning for the store share,
+  // probe — and lands in a guest already spinning for the share,
   // which by then is full. Without one, the same arguments cold-boot.
   const args =
     snapshot === null
@@ -265,7 +228,7 @@ export async function startVM({
       (mod) => {
         // Holding a run dependency keeps main() from starting until
         // the share is complete; vm.run releases it.
-        mod.addRunDependency(STORE_DEPENDENCY);
+        mod.addRunDependency(SHARE_DEPENDENCY);
 
         // The -L directory: BIOS blobs, kernel, initramfs.
         ensureDir(mod.FS, PACK_DIR);
@@ -275,7 +238,9 @@ export async function startVM({
         if (snapshot !== null) {
           mod.FS.writeFile(SNAPSHOT_FILE, snapshot, OWN);
         }
-        ensureDir(mod.FS, STORE_DIR);
+        for (const dir of SHARE_DIRS) {
+          ensureDir(mod.FS, `${SHARE_DIR}/${dir}`);
+        }
 
         onFilesystem(mod);
       },
@@ -291,7 +256,7 @@ export async function startVM({
   runtime.catch((err) => log(`engine failed: ${err.message ?? err}`));
 
   const mod = await filesystem;
-  const share = storeShare(mod.FS);
+  const share = packageShare(mod.FS);
 
   // Every resize from here on goes to the guest through the share; the
   // size at boot went in the manifest.
@@ -304,7 +269,7 @@ export async function startVM({
   // Reachable from the browser console: the terminal, the pty pair,
   // and everything the guest has said. Debugging a guest that will not
   // talk is otherwise guesswork.
-  window.trynix = {
+  window.tryarch = {
     terminal: ui.terminal,
     master,
     slave,
@@ -315,19 +280,17 @@ export async function startVM({
     terminal: ui.terminal,
     share,
 
-    // Finish the share and let QEMU run. `roots` are the basenames the
-    // reader selected, in selection order. Resolves when the guest is
-    // at its prompt — or when the page has given up waiting for it.
-    async run(roots) {
-      share.linkAll(share.written(), roots, Precedence.KEEP);
+    // Finish the share and let QEMU run. Resolves when the guest is at
+    // its prompt — or when the page has given up waiting for it.
+    async run() {
       mod.FS.writeFile(
         `${SHARE_DIR}/manifest`,
         manifest({ rows: ui.terminal.rows, cols: ui.terminal.cols }),
       );
-      mod.removeRunDependency(STORE_DEPENDENCY);
+      mod.removeRunDependency(SHARE_DEPENDENCY);
 
       // The handshake: init parks on a read until the page says the
-      // share is populated (nix/guest/init). Mounting only after this
+      // share is populated (guest/src/init). Mounting only after this
       // is what makes the snapshot possible to take at all, since
       // QEMU refuses to migrate a VM with a virtfs export mounted.
       //
@@ -345,7 +308,7 @@ export async function startVM({
       // QEMU has read everything it will ever read from /pack: the
       // snapshot is in the guest's RAM and the kernel and initramfs
       // are in the fw_cfg it booted from. The MEMFS copies are dead
-      // weight — the snapshot alone is 35 MB — so they go.
+      // weight — the snapshot alone is 32 MB — so they go.
       for (const name of [...guestFiles.keys(), SNAPSHOT_FILE]) {
         const path = name.startsWith("/") ? name : `${PACK_DIR}/${name}`;
         try {
@@ -356,26 +319,20 @@ export async function startVM({
       }
     },
 
-    // Add store paths to a VM that is already running.
+    // Add packages to a VM that is already running.
     //
     // The share is an ordinary directory in the emscripten filesystem
     // and 9p's local backend passes every lookup through to it, so
-    // writing a new store path after boot is enough for the guest to
-    // find it — no remount, no reboot. The farm is what lets the
-    // guest's PATH stay as it was: the new roots replace any link of
-    // the same name, so the package added last wins.
-    add(unpacked, roots) {
-      const basenames = [];
-      while (unpacked.length > 0) {
-        const { basename, entries } = unpacked.shift();
-        share.write(basename, entries);
-        basenames.push(basename);
-      }
-      share.linkAll(basenames, roots, Precedence.REPLACE);
+    // writing a package after boot is enough for the guest to find its
+    // programs on the PATH it already has — no remount, no reboot.
+    // Only /etc does not follow: the guest copied it at boot, so a
+    // later package's /etc files stay under /share/etc.
+    add(pkg) {
+      share.write(pkg);
     },
 
-    // The programs a written path offers, by basename.
-    programsOf: (basename) => share.programsOf(basename),
+    // The programs a written package offers, by name.
+    programsOf: (name) => share.programsOf(name),
   };
 }
 
@@ -394,9 +351,7 @@ async function coldBoot(console_, master, terminal) {
 // VM ran (tools/make-snapshot.py), the migration stream records that
 // runstate, and QEMU starts a restored VM whose source was running
 // without being told to — the fork's own migration example resumes
-// with -incoming and nothing else. An earlier version of this typed
-// `cont` at the monitor first, with a settling delay around each
-// keystroke, and spent three seconds of every resume on it.
+// with -incoming and nothing else.
 //
 // The guest is parked on init's read, exactly where the snapshot
 // caught it, so one newline finishes the handshake — but a newline
@@ -404,14 +359,12 @@ async function coldBoot(console_, master, terminal) {
 // says when loading is done. So newlines are offered every
 // RESUME_POLL_MS until the guest has mounted the share and said so.
 //
-// Waiting for the console to show anything at all is not good enough,
-// and stopping on that is what wedged this: the line discipline echoes
-// every newline straight back, so the console has output before the
-// guest has read a byte. A poll stopped on the strength of that echo
-// leaves a guest still parked on its read with nothing left to wake
-// it, and the boot then sits out the page's whole handshake timeout.
-// The spare newlines queue in the UART and reach the shell as bare
-// prompts, which the clear below removes.
+// Waiting for the console to show anything at all is not good enough:
+// the line discipline echoes every newline straight back, so the
+// console has output before the guest has read a byte. A poll stopped
+// on the strength of that echo leaves a guest still parked on its read
+// with nothing left to wake it. The spare newlines queue in the UART
+// and reach the shell as bare prompts, which the clear below removes.
 async function resume(console_, master, terminal) {
   const poll = setInterval(() => sendLine(master), RESUME_POLL_MS);
   sendLine(master);

@@ -1,113 +1,286 @@
 # Design
 
-trynix boots packages from nixpkgs history inside a qemu-wasm virtual
-machine, entirely client-side. A static site — no server anywhere — that
-resolves a package against the [nixpkgs-multiverse] index, fetches its
-closure from cache.nixos.org, and drops the user into a shell with the
-package on PATH.
+tryarch boots Arch Linux packages inside a qemu-wasm virtual machine,
+entirely client-side. A static site — no server anywhere — that resolves
+a package name against an index built at deploy time, downloads the
+`.pkg.tar.zst` from an Arch mirror, unpacks it in the tab, and drops the
+reader into a shell with the program on PATH.
 
-The pieces already exist in sibling projects; trynix is the glue:
+It is a fork of [trynix], which does the same thing for nixpkgs
+closures out of cache.nixos.org. The virtual machine is unchanged and so
+is most of the page; what changed is the package universe underneath,
+and the constraint that comes with it: Arch's infrastructure was not
+built for browsers, and almost none of it will talk to one.
 
-- [nixpkgs-multiverse] answers "which store path is `python3` 3.6.2" —
-  `outpaths-x86_64-linux.json` maps every `(attribute, version)` pair to
-  the digest Hydra built, the census says whether the cache still serves
-  it, and the meta shards carry sizes and references.
-- [grail] answers "which packages coexist" — clingo compiled to wasm
-  solves version-range queries in the browser, so "select multiple" is a
-  coexistence query (`python3@3.10.* ^openssl@1.1.*`) whose plan names
-  one time-consistent world.
-- [qemu-wasm] runs the result — QEMU compiled with emscripten, executing
-  an x86_64 guest in the tab.
+## Where the bytes come from
+
+Everything happens in the reader's tab, so every byte has to come from a
+host that sends `Access-Control-Allow-Origin`. That single requirement
+decides the whole data layer.
+
+**The official mirror list has 396 https mirrors. Five of them allow
+cross-origin reads**, on the repo databases and the package files alike,
+Range requests included. They are tried in this order:
+
+```
+https://mirror.lcarilla.de/archlinux/
+https://archlinux.mailtunnel.eu/
+https://repo.c48.uk/arch/
+https://mirror.iusearchbtw.nl/
+https://yonderly.org/mirrors/archlinux/
+```
+
+A package is `${mirror}${repo}/os/x86_64/${filename}` and a repository
+database is `${mirror}${repo}/os/x86_64/${repo}.db` — a gzipped tar of
+`<name>-<version>/desc` sections. `any`-arch packages live in the
+`x86_64` directory like everything else. Each mirror measured about
+4 MB/s.
+
+**History comes from the Internet Archive**, which mirrors the Arch
+Linux Archive as one item per package name, `archlinux_pkg_<name>`. The
+metadata endpoint `https://archive.org/metadata/archlinux_pkg_<name>`
+sends `Access-Control-Allow-Origin: *` and returns every archived file
+with its size, mtime and checksums; an item that does not exist returns
+`{}`. The bytes come from `https://archive.org/cors/<item>/<file>` at
+about 10 MB/s. Two things about that URL are load-bearing:
+
+- The filename must be percent-encoded with `encodeURIComponent`. A raw
+  `+` — and plenty of Arch versions have one — is read as a space there,
+  and the request 302s into a 404 page.
+- `https://archive.org/download/...` sends no CORS header at all. It is
+  the URL every human uses and the one URL this page can never use.
+
+**archive.archlinux.org, the real archive, sends no CORS header**, so
+the page cannot read it. That is not a detail: the Internet Archive's
+copy stops around **October 2024** (its newest item was added
+2024-10-10; the newest jq it holds is 1.7.1-2, the newest glibc is
+2.40+r16). Versions that were current after that date and have since
+been superseded exist in no source a browser can reach. The site says so
+in its About section, because a reader who asks for last month's version
+of something deserves an explanation rather than an empty list.
+
+Two more sources were checked and are not used: gitlab.archlinux.org's
+API v4 does allow cross-origin reads, which is worth knowing but nothing
+at runtime needs it, and archlinux.org has no CORS JSON API at all.
+
+**Integrity** is whatever the source publishes. A package named by a
+repository database is checked against the `%SHA256SUM%` from that
+database; an archived package is checked against the SHA-1 the Internet
+Archive records for the file. Both are verified with `crypto.subtle`
+before anything is unpacked. What is _not_ checked is the PGP signature
+pacman verifies, because a browser has no keyring and no path to one:
+the guarantee here is "these are the bytes that mirror and that database
+agree on", not "these were signed by an Arch developer".
+
+## The PKGBUILD link
+
+Every version on the page links to the recipe that built it:
+
+```
+https://gitlab.archlinux.org/archlinux/packaging/packages/<project>/-/blob/<tag>/PKGBUILD
+project = pkgbase with every "+" replaced by "plus"
+tag     = the full version with ":" replaced by "-"
+```
+
+So `libsigc++` is the project `libsigcplusplus`, and version `1:26.2.2-1`
+is the tag `1-26.2.2-1` while `1.8.2-1` is itself. The name that matters
+is `pkgbase` (`%BASE%` in a database, `pkgbase` in a `.PKGINFO`), not
+`pkgname`: a split package's parts share one recipe.
+
+## The index
+
+A repository database is a few megabytes of gzipped tar, and the page
+needs one lookup out of it. So it is turned inside out at deploy time by
+`tools/build-index.py`, which downloads `core.db` and `extra.db`, parses
+every `desc` section, and writes a static tree the page can fetch pieces
+of:
+
+```
+index/names.json         every name and a truncated description
+index/pkgs/<xx>.json     the current build of each package
+index/provides/<xx>.json which packages provide a virtual name
+```
+
+A shard `xx` is two hex digits of `FNV-1a(name) & 0xff` — 256 shards,
+computed identically in Python and JavaScript (`Math.imul` for the
+32-bit multiply), so the site and the indexer always agree on where a
+package lives. An entry carries the version, repo, filename, compressed
+and installed size, SHA-256, build date, dependencies, provides,
+`pkgbase`, description and upstream URL: everything needed to fetch and
+resolve a package without opening the package. Output is deterministic —
+sorted keys, no whitespace — so an unchanged repository produces an
+unchanged file.
+
+The index is never committed. It is a snapshot of what the mirrors hold
+right now, and mirrors delete superseded files within hours of a sync,
+so the pages workflow rebuilds it on every push and every six hours.
+
+**Even six hours is not always fresh enough.** When a build named by the
+index 404s on every mirror, the page fetches that repository's `.db`
+itself, registers the entries as an override, and re-resolves that
+package before giving up. It costs a few megabytes and only happens in
+the window between a sync and the next index build.
 
 ## The pipeline
 
-1. **Resolve.** Attribute (and optionally a version range) to one or
-   more store-path digests, from static index shards. A package split
-   across outputs gets its `bin` sibling too, from a digest-keyed map
-   the site build shards out of a multiverse release artifact
-   (nix/outputs.nix).
-2. **Walk.** Breadth-first over narinfos from cache.nixos.org to the
-   full runtime closure, and verify every signature against the
-   configured keys. The cache serves `access-control-allow-origin: *`,
-   so plain `fetch` works from any origin. Narinfos are kept in the
-   Cache API like everything else immutable, so a walk done once costs
-   no network again.
-3. **Fetch and unpack, streaming.** A NAR arrives xz or zstd compressed
-   depending on when it was built; both decoders are vendored. Each is
-   parsed and written into emscripten's filesystem under the share the
-   moment it lands, while the rest are still downloading and the engine
-   is still compiling. Compressed NARs are kept in the Cache API — a
-   store path is immutable, so a cached NAR can never be stale.
+1. **Resolve.** A name, a `name@version`, a range like `jq@>=1.7`, or a
+   database URL of your own, to one concrete build: a package file, its
+   mirrors, its digest and its dependencies.
+2. **Walk.** Breadth-first over dependencies, at most four packages in
+   flight. A dependency string is parsed the way pacman parses it
+   (`glibc`, `linux-api-headers>=4.10`, `libz.so=1-64`, plain `sh`), and
+   satisfied by an already-selected package, by a package of that name,
+   or by whatever provides it. Optional and build dependencies are
+   ignored — this is a runtime, not a build.
+3. **Fetch and unpack, streaming.** Each package is downloaded from the
+   first source that serves it, verified, decompressed (zstd today, xz
+   for most of the archive's history, gzip for the oldest), parsed as a
+   tar, and written into emscripten's in-memory filesystem the moment it
+   lands, while the rest are still downloading and the engine is still
+   compiling. A source that fails for any reason — a 404, a dropped CORS
+   header, a network error — is left for the next: the mirrors in order,
+   then archive.org for a build the archive has. Only when every source
+   answers 404 is the build gone; any other last failure is reported as
+   itself. Compressed files are kept in the browser's Cache API under
+   `tryarch-v1`; a package file at a given version is immutable, so a
+   cached one can never be stale.
 4. **Resume.** qemu-wasm with a prebuilt guest kernel and initramfs,
    resumed from a migration snapshot rather than booted (below). The
-   store enters the guest over virtio-9p; init mounts it, sources the
+   share enters the guest over virtio-9p; init mounts it, sources the
    manifest the page wrote, and execs a shell on the serial console.
 5. **Terminal.** [ghostty-web] — libghostty-vt, the parser the native
    app uses, compiled to wasm. The pty is xterm-pty's line discipline,
    which the engine was linked against, bridged by hand.
 
+### Version comparison, and the era rule
+
+Versions compare exactly as pacman compares them: `[epoch:]ver[-rel]`,
+epoch numerically, the rest by rpmvercmp's alternating numeric and
+alphabetic segments. Dependency checks follow `alpm_depcmp`, including
+the rule that a constraint with no `-rel` ignores the candidate's rel —
+`glibc>=2.38` is satisfied by `2.38-7`.
+
+The interesting case is asking for an old version. `jq@1.6-3` is not the
+jq of today, and neither are its dependencies: resolving them against
+the current repositories would hand a 2019 binary a 2026 glibc. So when
+a root package comes from the archive, its dependencies are resolved
+against the same moment in time — the newest version of each that
+satisfies the constraint _and_ was built no later than the root. That is
+the best a browser can do without a solver, and it is enough for the
+common case, which is one old program and the libraries it was built
+against.
+
 ## The link
 
 The URL is the page's state, so any environment is a link someone can
 send. Everything is in the query string, written back with
-`replaceState` as it changes, so the address bar is always the link
-for what is on screen:
+`replaceState` as it changes, so the address bar is always the link for
+what is on screen:
 
-| parameter                          | meaning                                   |
-| ---------------------------------- | ----------------------------------------- |
-| `pkg=jujutsu@0.43.0`               | an attribute at a version, from the index |
-| `pkg=ripgrep`                      | the newest version the index has          |
-| `path=/nix/store/<digest>-name`    | a store path, verbatim                    |
-| `cache=https://x.cachix.org x-1:…` | an extra binary cache and its public key  |
-| `boot=1`                           | start without a click                     |
+| parameter             | meaning                               |
+| --------------------- | ------------------------------------- |
+| `pkg=jq`              | the current version from the index    |
+| `pkg=jq@1.7.1-2`      | one exact version, archive included   |
+| `pkg=git,python`      | comma-separated, and `pkg` may repeat |
+| `repo=<url to a .db>` | an extra pacman repository            |
+| `boot=1`              | start without a click                 |
 
-Each parameter may repeat. `cache` is what makes a store path from
-someone's own cachix shareable: the path alone is not enough, since
-the walk needs a cache that holds it and a key that vouches for it,
-and both travel in the same link. Extra caches are tried after
-cache.nixos.org, in the order given, and nothing about them is kept in
-the browser — the link is the only place the list lives. A cache has
-to allow cross-origin reads for a page to fetch from it at all.
+`repo` is what makes a package that is in no Arch repository bootable:
+point it at any repository database whose host allows cross-origin
+reads, and its packages join the index for that visit, ahead of core and
+extra. Nothing about it is stored — the link is the only place the list
+lives. `site/examples/repo` is one such repository, three files built by
+`tools/make-example-repo.sh`, served from this site because GitHub Pages
+allows cross-origin reads on everything it serves.
 
 `boot=1` works in any link. The page never adds it to the address bar
-itself, though: a link copied from there lands on the selection with
-the Boot button ready, rather than starting a download on open. The
-one link the page writes with it is its own "start over in a fresh
-VM" reload, where starting at once is the point.
+itself, though: a link copied from there lands on the selection with the
+Boot button ready, rather than starting a download on open. The one link
+the page writes with it is its own "start over in a fresh VM" reload,
+where starting at once is the point.
 
-## The store share
+## The share
 
 The guest sees the page's directory `/share` through 9p, mounted at the
-same path, with `/nix` a symlink into it:
+same path. Packages are unpacked straight into it, so the share _is_ an
+Arch root:
 
 ```
-/share/nix/store/<basename>/...   the fetched closure
-/share/bin/<program> -> /nix/store/<basename>/bin/<program>
-/share/manifest                   PATH, TERM, LANG, and `resize`
+/share/usr/bin/jq        as the package laid it out
+/share/etc/...           copied into the guest's own /etc at boot
+/share/manifest          the environment, sourced by init
 ```
 
-`/share/bin` is a farm of symlinks, one per program in the closure, and
-the one directory the guest keeps on PATH. What the reader selected is
-linked first and wins a name collision; the rest of the closure only
-fills names still free, so a dependency never shadows a selection. It
-is what makes adding a package to a running VM silent: the page writes
-the new store paths and links, 9p shows them to the guest the moment
-they exist, and the new selection's links replace old ones so the most
-recent choice runs. Nothing is typed at the guest's shell. (The shell
-remembers a command it has already run at its old path until
-`hash -r`.)
+The manifest is written by the page and makes the guest look like Arch
+before the shell starts. Abridged — the real one symlinks `/usr`,
+`/lib`, `/lib64`, `/opt`, `/var` and `/srv` into the share and copies
+`/share/etc`:
 
-The manifest sets PATH, and the three things a serial console session
-lacks: a window size (`resize` asks the terminal where a cursor parked
-in the far corner landed and sets the tty from the answer; nothing
-else carries the browser's resize events into a 16550), a TERM
-(`xterm-256color`, the one name every era's ncurses knows; ghostty's
-own `xterm-ghostty` needs a terminfo only very recent ncurses
-carries), and a locale (`C.UTF-8`, built into glibc since 2.35; an
-older closure falls back to C, and perl says so). Deliberately not an
-LD_LIBRARY_PATH: one over the closure would override every binary's
-own DT_RUNPATH and hand two eras of glibc to each other's loader —
-that is how ripgrep beside lolcat died before it was removed.
+```sh
+ln -s /share/usr /usr; ln -s /share/usr/lib /lib; ln -s /share/usr/lib /lib64
+ln -s /share/opt /opt; ln -s /share/var /var; ln -s /share/srv /srv
+mkdir -p /root /home /run /tmp
+[ -d /share/etc ] && cp -a /share/etc/. /etc/
+export PATH=/usr/bin:/bin HOME=/root TERM=xterm-256color LANG=C.UTF-8
+stty rows R cols C
+```
+
+The initramfs has `bin proc sys dev share tmp etc` and nothing else — no
+`/usr`, no `/lib` — so those symlinks are the whole filesystem layout,
+and `/usr/bin/jq` resolves to the bytes the page just wrote. `/etc` is a
+copy rather than a symlink because the guest writes to it and the share
+is read-mostly.
+
+TERM is `xterm-256color`, the one name every era's ncurses knows;
+ghostty's own `xterm-ghostty` needs a terminfo only very recent ncurses
+carries. LANG is `C.UTF-8`, which glibc has had since 2.35 — an older
+package falls back to C, and perl says so. `stty` carries the browser's
+window size into a serial console, which has no other way to learn it,
+and the page keeps it in step as the terminal is resized.
+
+Writing a package into the share is first-writer-wins: files and
+symlinks from the package selected first survive, directories merge, and
+a hardlink becomes a copy of the target's bytes. Symlink targets are
+made absolute, which is not cosmetic — see "Where emscripten and the
+guest disagree" below.
+
+Two consequences worth stating plainly. **`.INSTALL` scriptlets never
+run**: the page pulls the scriptlet out of the package and stops there,
+because it is a shell program written for a real system with a pacman
+database, and running one here would be neither safe nor meaningful.
+And **a package added to a running VM does not get its `/etc` merged**:
+`/etc` was copied once, at boot, so a later package's configuration
+stays under `/share/etc` where the reader can find it.
+
+## The guest, and why it still says trynix
+
+The virtual machine is trynix's, byte for byte. The engine and the
+migration snapshot are fetched by hash from that project's releases
+(`engine-pins.json`), and the guest image itself is committed under
+`guest/`, because tryarch changed the package universe and not the
+machine, and there was nothing to rebuild.
+
+That has one visible consequence: the guest's init prints
+
+```
+trynix: waiting for the store
+trynix: welcome to the multiverse
+```
+
+and the page still matches those strings, because they are how it knows
+the guest is up and the share is mounted. The initramfs that prints them
+lives inside the snapshot's RAM image, so renaming them means rebuilding
+the guest, retaking the snapshot on a native build of the fork, and
+republishing the engine release (docs/engine.md) — a lot of moving parts
+for two strings nobody sees. Init also still runs
+`ln -s /share/nix /nix`, a leftover from trynix's store layout: nothing
+in tryarch writes `/share/nix`, so the link dangles and is harmless.
+
+`engine-pins.json` records the hash of each file of the guest image the
+snapshot was taken from, and `tools/build-site.py` refuses to assemble a
+site whose committed `guest/` does not match. That check is the only
+thing standing between a kernel config change and a site that hangs on a
+resume.
 
 ## Start time
 
@@ -116,10 +289,14 @@ to a shell prompt is about 3 seconds:
 
 | stage                                             | about  |
 | ------------------------------------------------- | ------ |
-| closure walk (cached narinfos)                    | 0.1 s  |
 | engine instantiated (wasm from the HTTP cache)    | 1.0 s  |
 | QEMU up, migration stream loaded, guest answering | +1.5 s |
 | guest mounts the share and starts the shell       | +0.5 s |
+
+On a cold cache add the download: about 4 MB/s from a mirror, about
+10 MB/s from the Internet Archive, for a package and its dependencies.
+Both run while the engine is compiling, so for anything small the boot
+is the cost, not the bytes.
 
 What got it there, and what was tried and dropped:
 
@@ -130,56 +307,59 @@ What got it there, and what was tried and dropped:
   image boots to the point where init has done its one-time work and
   parks on a `read`, deliberately before mounting the share: QEMU
   refuses to migrate a VM with a virtfs export mounted, and it also
-  means one snapshot serves every package selection. On resume the
-  page hands the guest a newline and it mounts whatever share the page
-  built.
+  means one snapshot serves every package selection. On resume the page
+  hands the guest a newline and it mounts whatever share the page built.
 - **No monitor conversation.** A restored VM whose source was running
   starts running; the migration stream carries the runstate. The page
-  used to toggle to QEMU's monitor, type `cont`, and toggle back, with
-  a settling delay around each keystroke — three seconds of nothing.
-- **Polling the handshake.** The first newline of a resume is lost —
-  the UART it lands in is overwritten by the restore — and nothing
-  says when the restore is done. Retrying after four seconds was most
-  of the remaining time; the page now offers a newline every 300 ms
-  until the guest says anything. The spares queue in the UART and
-  reach the guest together, so the manifest drains them before
-  anything reads the tty, and the page has the shell redraw its prompt
-  with Ctrl-L after clearing the console.
+  used to toggle to QEMU's monitor, type `cont`, and toggle back, with a
+  settling delay around each keystroke — three seconds of nothing.
+- **Polling the handshake.** The first newline of a resume is lost — the
+  UART it lands in is overwritten by the restore — and nothing says when
+  the restore is done. Retrying after four seconds was most of the
+  remaining time; the page now offers a newline every 300 ms until the
+  guest's console transcript carries the marker init prints once the
+  share is mounted. Watching for any output at all is not enough: the
+  line discipline echoes each newline straight back. The spares queue in
+  the UART and reach the shell as bare prompts, which nothing drains —
+  the page waits until the console has been quiet for 400 ms, clears the
+  terminal, and sends Ctrl-L so the shell draws one prompt back.
 - **Streaming instantiation.** The wasm is not fetched by the page.
-  emscripten streams it from its URL, which compiles while downloading
-  and lets the browser keep the compiled code across visits — neither
-  happens for a buffer the page passes in. The page only warms the
-  HTTP cache, with a progress bar. On GitHub Pages the COOP/COEP
-  service worker synthesises the response, which loses the compiled
-  code cache; a host that sets the headers itself would keep it.
-- **Guest RAM.** A 256M guest resumes about 0.3 s faster than 512M
-  (the migration load touches every page) and its snapshot is 5 MB
-  smaller. Not worth halving the guest for; 512M stays.
+  emscripten streams it from its URL, which compiles while downloading —
+  that does not happen for a buffer the page passes in. The page only
+  warms the HTTP cache, with a progress bar. Moving off GitHub Pages to
+  drop the COOP/COEP service worker was tried on the theory that the
+  worker costs the browser's compiled-wasm cache; it is a dead end,
+  measured in docs/performance.md, because compiling the engine is 56 ms
+  either way.
+- **Guest RAM.** A 256M guest resumes about 0.3 s faster than 512M (the
+  migration load touches every page) and its snapshot is 5 MB smaller.
+  Not worth halving the guest for; 512M stays.
 
 Migration demands that snapshotter and restorer agree exactly — QEMU
-version, machine type, device config, RAM size. `nix/guest/machine.json`
-is the one description of the machine; the page and the snapshot tool
-both start QEMU from it, and its hash rides in the pins.
+version, machine type, device config, RAM size. `guest/machine.json` is
+the one description of the machine; the page and the snapshot tool both
+start QEMU from it, and its hash rides in the pins.
 
 ## Memory
 
-The closure lives once, in emscripten's in-memory filesystem, as the
-decompressed NAR buffers themselves: MEMFS is told to keep the views
-it is handed (`canOwn`) rather than copy them. The page never holds
-more than the few NARs in flight, and once the guest is at its prompt
-the kernel, initramfs and snapshot copies in `/pack` are unlinked
-(QEMU has read them; the snapshot alone is 35 MB). Before this the
-whole closure existed three times over — compressed, decompressed,
-and copied into MEMFS — and a large one ran the tab out of room, which
-surfaces as a bare "TypeError: Failed to fetch".
+The unpacked packages live once, in emscripten's in-memory filesystem,
+as the decompressed tar buffers themselves: MEMFS is told to keep the
+views it is handed (`canOwn`) rather than copy them. The page never
+holds more than the few packages in flight, and once the guest is at its
+prompt the kernel, initramfs and snapshot copies in `/pack` are unlinked
+(QEMU has read them; the snapshot alone is 32 MB).
 
-The ceiling that remains is the closure's unpacked size, in the tab.
-The way past it is a share that decompresses a NAR on the guest's
+The ceiling that remains is the **unpacked** size of the selection, in
+the tab: about 1.2 GB, beside a 512 MiB guest. docs/performance.md has
+where that budget comes from and what could move it. Exceeding it
+surfaces as a bare "TypeError: Failed to fetch", which is the tab
+running out of room rather than a network failure.
+
+The way past it is a share that decompresses a package on the guest's
 first touch of it rather than up front, keeping the compressed bytes
-until then. Fetching lazily is not possible against cache.nixos.org,
-which serves compressed NARs only; decompressing lazily is, and needs
-an emscripten filesystem node whose contents are produced on first
-read.
+until then. Unlike cache.nixos.org, the mirrors do serve Range requests,
+so even fetching lazily is on the table; both need an emscripten
+filesystem node whose contents are produced on first read.
 
 ## Speed
 
@@ -187,78 +367,101 @@ The guest runs on the fork's wasm TCG backend: a translation block is
 interpreted until its 1500th execution, then compiled to a small wasm
 module. Measured in the guest, both loops of ten:
 
-| workload                        | before | after |
-| ------------------------------- | ------ | ----- |
-| exec of `hello` (dynamic, 9p)   | 8.6 s  | 1.1 s |
-| exec of busybox `true`          | —      | 0.3 s |
-| `cat` of a file on the share    | —      | 0.7 s |
-| 20 000 iterations of `$((i+1))` | 7.7 s  | 7.7 s |
+| workload                         | before | after |
+| -------------------------------- | ------ | ----- |
+| exec of a dynamic binary over 9p | 8.6 s  | 1.1 s |
+| exec of busybox `true`           | —      | 0.3 s |
+| `cat` of a file on the share     | —      | 0.7 s |
+| 20 000 iterations of `$((i+1))`  | 7.7 s  | 7.7 s |
 
 Where the exec time went, and what was done:
 
 - **9p with no cache.** The share was mounted `cache=none`: every exec
-  walked every path component and read glibc over the wire again.
-  `cache=loose` keeps dentries, inodes and page cache in the guest; the
-  store is immutable so nothing cached goes stale, and 9p drops
-  negative dentries so a name that was missing once is looked up
-  again — which is what lets packages be added later.
+  walked every path component and read libc over the wire again.
+  `cache=loose` keeps dentries, inodes and page cache in the guest;
+  nothing already written is ever rewritten, so nothing cached goes
+  stale, and 9p drops negative dentries so a name that was missing once
+  is looked up again — which is what lets packages be added later.
 - **Mitigations.** Page-table isolation and friends make every syscall
   flush the emulated TLB. The guest has nothing to protect from itself
   and runs with `mitigations=off`.
 - **One syscall per 9p operation.** Under emscripten every filesystem
-  syscall is a synchronous round trip to the browser's main thread,
-  and QEMU's local backend opened a path one component at a time to
-  keep a symlink from escaping the export. The share is a private
-  in-memory directory; `patches/0002` opens and stats a path in one
-  call. Worth 10–25% on file operations once the guest caches.
+  syscall is a synchronous round trip to the browser's main thread, and
+  QEMU's local backend opened a path one component at a time to keep a
+  symlink from escaping the export. The share is a private in-memory
+  directory; `patches/0002` opens and stats a path in one call. Worth
+  10–25% on file operations once the guest caches.
 - **A lower JIT threshold** (300 instead of 1500) was built and
   measured: slower on both loops, since short-lived processes pay the
-  compile and never amortise it. Not adopted.
+  compile and never amortise it. Not adopted. The 1500 is the fork's own
+  TCG setting and neither number was re-measured for tryarch — see the
+  dead ends in docs/performance.md, where the original measurement is
+  marked untrustworthy.
 
 What is left is emulation itself: a shell loop runs about 400 µs per
 iteration, and a fork-plus-exec about 30 ms even with nothing on 9p.
-Nothing in a browser accelerates that — there is no KVM — so the
-levers are the emulator's. JSLinux's x86 engine (the one that boasts
-AVX-512 and APX) is unreleased, TinyEMU has no x86_64, v86 is 32-bit;
-an aarch64 guest on qemu-wasm's aarch64 target is the one untried
-experiment with any chance of a different constant, and the multiverse
-has aarch64-linux data to feed it.
+Nothing in a browser accelerates that — there is no KVM — so the levers
+are the emulator's.
 
 ## Where emscripten and the guest disagree
 
 Three bugs, all in the seam between emscripten's filesystem and a real
 Linux guest reading it over 9p. Each one is invisible until a package
-does something more than `hello` does, and each is worth knowing before
-changing this code.
+does something more than print a greeting, and each is worth knowing
+before changing this code.
 
 **Symlinks.** `FS.readlink` resolves a link against its parent and
 returns an absolute path, while the stat beside it reports the
 _relative_ target's length. A guest reading such a link gets a string
-longer than the size it was promised. trynix writes absolute targets
-itself (`absoluteTarget` in `site/js/store.js`) so the two agree, and
+longer than the size it was promised. tryarch writes absolute targets
+itself (`absoluteTarget` in `site/js/share.js`) so the two agree, and
 mounts the share in the guest at the same path the page built it at
 (`/share`) so those absolute targets resolve. The mount point is
-load-bearing, not cosmetic.
+load-bearing, not cosmetic — and Arch packages are full of symlinks,
+starting with every `libfoo.so` in `/usr/lib`.
 
 **Errnos.** 9p2000.L carries Linux errno numbers, but emscripten's libc
 numbers its errnos after WASI. qemu-wasm declares emscripten to need no
 translation, so ENOENT (44 in WASI, 2 in Linux) reaches the guest as
-ECHRNG. A dynamic loader walking `LD_LIBRARY_PATH` expects ENOENT from
+ECHRNG. A dynamic loader walking its search path expects ENOENT from
 directories that lack the library and moves on; given "Error 44" it
-stops. Every package that finds libraries by search rather than by
-RPATH fails to start, naming a library `ls` will show and `cat` will
-read. `patches/0001-9pfs-translate-emscripten-errnos-to-linux.patch`
-fixes it in the engine, and is worth sending upstream.
+stops. Every package that finds libraries by search rather than by RPATH
+fails to start — which, on Arch, is every package.
+`patches/0001-9pfs-translate-emscripten-errnos-to-linux.patch` fixes it
+in the engine, and is worth sending upstream.
 
 **stdout.** Defining `Module.print` or `printErr` takes stdout and
-stderr away from the xterm-pty js-library linked into the build, and
-the console stays blank for the whole run — guest output included.
-QEMU's diagnostics arrive in the terminal instead.
+stderr away from the xterm-pty js-library linked into the build, and the
+console stays blank for the whole run — guest output included. QEMU's
+diagnostics arrive in the terminal instead.
 
 And one thing that is not a bug: busybox's `clear` sends only the
 erase-screen sequence, so the terminal's scrollback survives it. The
-`clear` from ncurses sends erase-scrollback too, and a guest with it
-on PATH behaves as expected.
+`clear` from ncurses sends erase-scrollback too, and a guest with it on
+PATH behaves as expected.
+
+## Limits
+
+Collected in one place, because most of them are consequences of
+decisions above rather than things left undone:
+
+- **No PGP verification.** SHA-256 from the repository database, SHA-1
+  from the Internet Archive, and https to a mirror. No keyring.
+- **`.INSTALL` scriptlets are never run**, and a package added after
+  boot does not get its `/etc` into the guest's `/etc`.
+- **core and extra, `x86_64` and `any` only.** multilib is skipped: it
+  exists to run 32-bit binaries beside 64-bit ones, which is a use for a
+  desktop and not for a shell in a tab. The AUR cannot be booted at all
+  — it publishes recipes, not binaries, and building one would need the
+  whole toolchain in the guest.
+- **History stops around October 2024**, and only for packages the
+  Internet Archive happened to have collected.
+- **Five mirrors.** The list was scanned by hand and nothing keeps it
+  correct: a mirror that stops sending the CORS header stops working,
+  and if all five stop, so does the site. Re-running the scan is a
+  manual job, and the page tries every mirror before it fails.
+- **One vCPU, 512 MiB, no network in the guest.** Programs that want a
+  network, a service manager or a real init will not find one.
 
 ## Performance
 
@@ -268,32 +471,43 @@ things that looked like they would and did not:
 
 ## Repository layout
 
-- `site/` — the static site (vanilla ES modules; the multiverse chrome
-  and tokens, so the family of sites reads as one).
-- `nix/` — the flake's pieces: `site.nix` assembles the deployable tree
-  with the multiverse js.<hash> cache-busting trick, `guest.nix` builds
-  the kernel and initramfs, `engine.nix` fetches the pinned engine,
-  `formatter.nix` is `nix fmt`.
-- `patches/` — what the engine is built with.
-- `tools/` — the engine tools, each a flake app (docs/engine.md).
-- `tests/` — node test suite; run by `checks.tests`, offline.
-- `docs/` — this file and docs/engine.md.
+- `site/` — the static site (vanilla ES modules; the tokens and chrome
+  of the author's other sites, so the family reads as one).
+- `guest/` — the guest image, committed prebuilt: kernel, initramfs,
+  BIOS blobs and `machine.json`; `guest/src/` is what they are built
+  from, and `tools/build-guest.sh` rebuilds them in a container.
+- `engine-pins.json` — the release the engine and the snapshot are
+  fetched from, by hash, and the hashes of the guest the snapshot was
+  taken against.
+- `patches/` — what the engine is built with, plus two against vendored
+  browser libraries.
+- `tools/` — plain python3 and bash. `build-site.py` assembles the
+  deployable tree, including the js.<hash> cache-busting trick;
+  `vendor.py` copies the browser libraries out of `node_modules`;
+  `fetch-engine.py` resolves the pins; `build-index.py` builds the
+  index; `serve.py` serves a built tree; the rest are the engine tools
+  (docs/engine.md).
+- `examples/` — the PKGBUILD behind the extra-repository example, built
+  into `site/examples/repo` by `tools/make-example-repo.sh`.
+- `tests/` — the node and python suites, offline; run by CI along with
+  `prettier --check`.
+- `docs/` — this file, docs/engine.md and docs/performance.md.
 
 ## Alternatives considered
 
 qemu-wasm's own README names the prior art; none of it can run the
-x86_64 binaries cache.nixos.org holds, which is the requirement that
-decides everything:
+x86_64 binaries the mirrors hold, which is the requirement that decides
+everything:
 
 - **JSLinux** (bellard.org/jslinux) emulates a 64-bit x86 CPU — AVX-512
   and APX included — and boots in seconds, but that engine's source is
   unreleased: the published TinyEMU (2019-12-21, MIT) carries only the
-  old 32-bit x86 and the RISC-V emulators, and its vfsync filesystem
-  and websocket VPN are services on bellard.org. Nothing to build on
-  today; a future source release would be worth revisiting as a
-  smaller, faster backend.
-- **v86** is fast and maintained but 32-bit x86 by design; i686
-  nixpkgs is not substitutable at any depth of history that matters.
+  old 32-bit x86 and the RISC-V emulators, and its vfsync filesystem and
+  websocket VPN are services on bellard.org. Nothing to build on today;
+  a future source release would be worth revisiting as a smaller, faster
+  backend.
+- **v86** is fast and maintained but 32-bit x86 by design, and Arch has
+  not shipped 32-bit packages for years.
 - **qemu.js** (the frozen port) predates wasm threads and asyncify;
   qemu-wasm is that idea done with them.
 - **Unicorn.js** is QEMU's CPU core extracted for binary analysis — no
@@ -301,22 +515,23 @@ decides everything:
 
 JSLinux still contributes the design worth stealing: vfsync faults the
 root filesystem in over HTTP per file as the guest touches it, which is
-why it boots instantly. The equivalent here is the lazy-decompressing
-share described under Memory.
+why it boots instantly. The equivalent here is the lazy share described
+under Memory, and the mirrors' Range support makes it more plausible
+than it was for trynix.
 
 ## Open questions
 
-- A nix-native emscripten build of the fork, so the engine is a
-  derivation rather than a docker recipe (docs/engine.md).
-- The compiled-code cache on GitHub Pages: the COOP/COEP service worker
-  costs it. A host that sends the headers (Cloudflare Pages takes a
-  `_headers` file) would drop the worker and keep the cache.
-- Autocompleting store paths in the store-path lane needs an index
-  keyed by digest, which the multiverse does not publish; its shards
-  are keyed by attribute.
-- An aarch64 guest, as the one emulation experiment left.
+- An engine build that does not need docker and a pinned emscripten
+  SDK, so a checkout can rebuild it (docs/engine.md).
+- Rescanning the mirror list automatically, and noticing when one of the
+  five stops answering, rather than finding out from a broken boot.
+- A real solver for the era rule, so an old package's whole dependency
+  set is chosen as one consistent world instead of newest-that-fits, one
+  at a time.
+- An aarch64 guest, as the one emulation experiment left — the archive
+  has no aarch64 packages, so it would need a different package source
+  as well as a different engine.
 
-[nixpkgs-multiverse]: https://github.com/fzakaria/nixpkgs-multiverse
-[grail]: https://github.com/fzakaria/grail
+[trynix]: https://github.com/fzakaria/trynix
 [qemu-wasm]: https://github.com/ktock/qemu-wasm
 [ghostty-web]: https://github.com/coder/ghostty-web

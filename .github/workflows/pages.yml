@@ -1,12 +1,24 @@
-# Publishes the site to GitHub Pages. The deployed tree is exactly
-# `nix build .#site` — the same one `nix run .#serve` tests locally —
-# so this job builds and uploads, and decides nothing.
+# Publishes the site to GitHub Pages. The deployed tree is what
+# `python3 tools/build-site.py _site` assembles -- the same one
+# `python3 tools/serve.py` shows locally -- plus the package index built
+# here, so this job builds and uploads, and decides nothing.
+#
+# The index is the reason for the schedule. It is a snapshot of what the
+# Arch mirrors are serving right now, and mirrors delete superseded
+# package files within hours of a sync, so an index left alone for a day
+# names files that 404. Six-hourly keeps it close; the page falls back
+# to fetching the repo database itself for whatever slipped through
+# (docs/design.md).
 #
 # The engine and the snapshot are not built here: they need docker and
 # emscripten, and a native build of the same QEMU fork (docs/engine.md).
-# They are built by hand, published to the `engine` release, and pinned
-# by hash in nix/engine-pins.json, so the derivation fetches them
-# rather than the workflow.
+# They are built by hand, published to a dated release and pinned by
+# hash in engine-pins.json, so the build downloads them and verifies
+# them rather than compiling them. The cache below keeps those 45 MB
+# between runs, keyed on the pins, so a run only downloads them when
+# they change. The guest image is not downloaded at all: kernel,
+# initramfs and BIOS blobs are committed in guest/, and the build checks
+# them against the same pins.
 #
 # One-time setup: repository Settings -> Pages -> Source: "GitHub Actions".
 name: pages
@@ -16,10 +28,17 @@ on:
     branches: [main]
     paths:
       - site/**
-      - nix/**
       - tools/**
-      - flake.lock
+      - guest/**
+      - patches/**
+      - engine-pins.json
+      - package.json
+      - package-lock.json
       - .github/workflows/pages.yml
+  # Not on the hour: nothing here needs to race the mirrors' own syncs
+  # or every other cron on the runners.
+  schedule:
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -42,28 +61,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/setup-node@v4
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            accept-flake-config = true
+          node-version: 22
+          cache: npm
 
-      - uses: cachix/cachix-action@v15
+      # The pinned engine, so a run that changes nothing about it starts
+      # from disk. A new release means new pins, a new key and one
+      # download; there is no restore-keys fallback, because a stale
+      # entry would only be verified and thrown away.
+      - uses: actions/cache@v4
         with:
-          name: trynix
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          skipPush: ${{ secrets.CACHIX_AUTH_TOKEN == '' }}
+          path: .cache/engine
+          key: engine-${{ hashFiles('engine-pins.json') }}
+
+      # The browser libraries the page loads: npm pins them, and
+      # tools/vendor.py copies the handful of files out of the tree.
+      - run: npm ci
 
       - name: Build the site
-        # Everything served is in this one derivation — site, vendored
-        # dependencies, engine, snapshot, guest image, sibling-output
-        # shards and the asset manifest. The store output is read-only
-        # and symlinked; the pages artifact needs a plain writable
-        # directory, so dereference-copy it out.
-        run: |
-          nix build .#site -L
-          cp -rL result _site
-          chmod -R u+w _site
+        # Everything served but the index: site, vendored libraries,
+        # engine, snapshot, guest image and the asset manifest.
+        run: python3 tools/build-site.py _site
+
+      - name: Build the package index
+        # The runner's own python3; the indexer is stdlib only. It exits
+        # non-zero if a mirror is unreachable, which fails the deploy
+        # rather than publishing a site with no package list.
+        run: python3 tools/build-index.py _site/index
 
       - uses: actions/configure-pages@v5
 

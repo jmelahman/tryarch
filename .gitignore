@@ -1,4 +1,11 @@
-result
 vendor/
 __pycache__/
 node_modules/
+
+# The package index is built at deploy time from what the Arch mirrors
+# hold right now (tools/build-index.py), never committed: it is several
+# megabytes and stale the day it is written.
+index/
+site/index/
+_site/
+.cache/

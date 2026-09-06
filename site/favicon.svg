@@ -1,0 +1,11 @@
+<!-- Three bars at 16px, arranged as an "A": two legs and a crossbar, the
+     crossbar marked in red. pkglint's mark is the same charcoal tile with the
+     same bars ruled flat; standing them up keeps the two tabs siblings and
+     still tells them apart at favicon size, where a letterform drawn any
+     thinner than a bar would not survive. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="tryarch">
+  <rect width="32" height="32" rx="5" fill="#0a0a0c"/>
+  <path d="M8.5 25 16 7.5 23.5 25" fill="none" stroke="#4a4a54" stroke-width="4"
+    stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M11.5 20.5h9" fill="none" stroke="#f4635e" stroke-width="4" stroke-linecap="round"/>
+</svg>

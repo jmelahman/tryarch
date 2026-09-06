@@ -1,109 +1,131 @@
-// The package picker: type an attribute, choose versions, collect them
-// into a selection the boot mounts together. Everything is read from
-// the multiverse index at runtime; nothing is bundled.
+// The package picker: type a name, pick one, and the page resolves the
+// version. Everything comes from the generated index at runtime;
+// nothing about the package universe is bundled.
 
-import { searchAttrs, versionsOf } from "./multiverse.js";
-import { humanBytes } from "./format.js";
+import { searchNames } from "./index.js";
 import { SEARCH_LIMIT } from "./config.js";
 
 // How long the box sits still before a keystroke becomes a search.
 const DEBOUNCE_MS = 120;
 
+// The repos with a colour of their own; anything else — a repo somebody
+// pasted the URL of — shares one.
+const KNOWN_REPOS = new Set(["core", "extra", "archive"]);
+
+export const repoClass = (repo) =>
+  `repo repo-${KNOWN_REPOS.has(repo) ? repo : "other"}`;
+
 export class PackagePicker {
-  // onPick hears one version record each time a version is chosen; the
-  // page owns the selection, since packages also arrive from the range
-  // lane and from a pasted store path.
+  // onPick hears one hit ({name, desc, repo}) each time one is chosen;
+  // the page owns the selection, since packages also arrive from the
+  // spec lane and from the link the reader followed.
   constructor({ input, results, onPick }) {
     this.input = input;
     this.results = results;
     this.onPick = onPick;
+    this.hits = [];
+    this.selected = -1;
 
     let timer;
     input.addEventListener("input", () => {
       clearTimeout(timer);
       timer = setTimeout(() => this.search(), DEBOUNCE_MS);
     });
+    input.addEventListener("keydown", (event) => this.onKeyDown(event));
   }
 
   async search() {
     const query = this.input.value.trim();
     if (query === "") {
-      this.results.replaceChildren();
+      this.clear();
       return;
     }
 
-    const matches = await searchAttrs(query, SEARCH_LIMIT);
-    if (matches.length === 0) {
+    const hits = await searchNames(query, SEARCH_LIMIT);
+    // A slow answer for a query the reader has already typed past is
+    // not the answer to what is in the box now.
+    if (this.input.value.trim() !== query) {
+      return;
+    }
+
+    this.hits = hits;
+    this.selected = -1;
+
+    if (hits.length === 0) {
       this.results.replaceChildren(
-        el("p", { className: "muted" }, "no such attribute"),
+        el("p", { className: "muted" }, `no package named ${query}`),
       );
       return;
     }
 
     this.results.replaceChildren(
-      ...matches.map((match) =>
-        el(
+      ...hits.map((hit, i) => {
+        const node = el(
           "button",
-          {
-            className: "attr",
-            type: "button",
-            onclick: () => this.expand(match.attr),
-          },
-          el("span", { className: "name" }, match.attr),
-          el("span", { className: "muted" }, `${match.versionCount} versions`),
-        ),
-      ),
+          { className: "hit", type: "button", onclick: () => this.pick(i) },
+          el("span", { className: "pkg" }, hit.name),
+          el("span", { className: repoClass(hit.repo) }, hit.repo),
+          el("span", { className: "desc" }, hit.desc),
+        );
+        // Set rather than assigned: the reflected `role` property is
+        // newer than the browsers this page still runs in.
+        node.setAttribute("role", "option");
+        node.setAttribute("aria-selected", "false");
+        return node;
+      }),
     );
   }
 
-  // One attribute's versions, newest first, each a button that adds it
-  // to the selection. A version the census found gone is shown but not
-  // selectable — its bytes are no longer in the cache.
-  async expand(attr) {
-    this.results.replaceChildren(
-      el("p", { className: "muted" }, `loading ${attr}…`),
-    );
-    const versions = await versionsOf(attr);
+  clear() {
+    this.hits = [];
+    this.selected = -1;
+    this.results.replaceChildren();
+  }
 
-    if (versions.length === 0) {
-      this.results.replaceChildren(
-        el(
-          "p",
-          { className: "muted" },
-          `${attr} has no x86_64-linux build in the index`,
-        ),
-      );
+  pick(i) {
+    const hit = this.hits[i];
+    if (hit !== undefined) {
+      this.onPick(hit);
+    }
+  }
+
+  // Arrow keys walk the list, Enter takes the highlighted hit (or the
+  // first, so a reader who types a name and presses Enter gets it).
+  move(delta) {
+    if (this.hits.length === 0) {
       return;
     }
+    this.selected =
+      (this.selected + delta + this.hits.length) % this.hits.length;
+    for (const [i, node] of [...this.results.children].entries()) {
+      const on = i === this.selected;
+      node.classList.toggle("selected", on);
+      node.setAttribute("aria-selected", String(on));
+      if (on) {
+        node.scrollIntoView({ block: "nearest" });
+      }
+    }
+  }
 
-    this.results.replaceChildren(
-      el("p", { className: "muted" }, `${attr} · ${versions.length} versions`),
-      ...versions.map((version) => {
-        const dead = version.alive === false;
-        return el(
-          "button",
-          {
-            className: dead ? "version dead" : "version",
-            type: "button",
-            disabled: dead,
-            title: dead
-              ? "the cache no longer serves this path"
-              : version.storePath,
-            onclick: () => this.onPick(version),
-          },
-          el("span", { className: "name" }, version.version),
-          el(
-            "span",
-            { className: "muted" },
-            dead
-              ? "gone"
-              : version.closureSize > 0
-                ? humanBytes(version.closureSize)
-                : "",
-          ),
-        );
-      }),
-    );
+  onKeyDown(event) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      this.move(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      this.move(-1);
+      return;
+    }
+    if (event.key === "Escape") {
+      this.clear();
+      return;
+    }
+    if (event.key === "Enter" && this.hits.length > 0) {
+      event.preventDefault();
+      this.pick(this.selected === -1 ? 0 : this.selected);
+    }
   }
 }
 

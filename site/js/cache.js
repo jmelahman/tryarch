@@ -1,12 +1,12 @@
 // A persistent cache for the bytes that never change: the qemu engine,
-// the guest image, the snapshot, and every NAR (a store path is
-// immutable by construction — its digest is the hash of its contents,
-// so a cached NAR can never be stale).
+// the guest image, the snapshot, and every package file (a package
+// filename names its exact version, and Arch never rebuilds one under
+// the same name, so a cached package can never be stale).
 //
 // The Cache API is used rather than OPFS because these are all plain
-// GETs and the entries are whole HTTP responses. Cross-origin NARs are
-// storable because cache.nixos.org sends CORS headers, which keeps the
-// responses non-opaque.
+// GETs and the entries are whole HTTP responses. Cross-origin packages
+// are storable because the mirrors the site uses send CORS headers,
+// which keeps the responses non-opaque.
 //
 // Reads and writes are deliberately separate calls. Handing `put` a
 // `response.clone()` while streaming the original tees one body into
@@ -19,7 +19,7 @@
 // Every call degrades to no caching at all: a private window, blocked
 // site data, or a full quota costs a download, never an error.
 
-const CACHE_NAME = "trynix-v1";
+const CACHE_NAME = "tryarch-v1";
 
 let cachePromise;
 function openCache() {

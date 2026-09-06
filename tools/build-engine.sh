@@ -4,7 +4,7 @@
 # patches applied. docs/engine.md explains the recipe; this is it as a
 # command.
 #
-#   nix run .#build-engine -- <qemu-wasm checkout> <output directory>
+#   tools/build-engine.sh <qemu-wasm checkout> <output directory>
 #
 # Needs docker. The first run builds the fork's toolchain image
 # (emscripten/emsdk plus zlib, libffi, glib and pixman cross-built for
@@ -22,12 +22,12 @@ fi
 SRC_CHECKOUT=$1
 OUT=$2
 HERE=$(cd "$(dirname "$0")" && pwd)
-# Run as a flake app the script lives alone in the store, so the repo's
-# patches cannot be found beside it; flake.nix passes their path in.
-PATCHES=${TRYNIX_PATCHES:-$HERE/../patches}
+# The patches beside the script, which is where a checkout keeps them.
+# TRYARCH_PATCHES is for building from a tree that is not this one.
+PATCHES=${TRYARCH_PATCHES:-$HERE/../patches}
 
-IMAGE=trynix-buildqemu
-CONTAINER=trynix-build-engine-$$
+IMAGE=tryarch-buildqemu
+CONTAINER=tryarch-build-engine-$$
 JOBS=$(nproc)
 
 # The emscripten flags are upstream's, verbatim: they decide the ABI

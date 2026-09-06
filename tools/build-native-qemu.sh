@@ -5,7 +5,7 @@
 # QEMU version, machine type and devices, so nixpkgs' QEMU cannot
 # stand in for an 8.2-based fork.
 #
-#   nix run .#build-native-qemu -- <qemu-wasm checkout> <output directory>
+#   tools/build-native-qemu.sh <qemu-wasm checkout> <output directory>
 #
 # Needs docker. Builds in the fork's own toolchain container (gcc 14
 # with glib, pixman, libffi and libattr), statically, so the binary
@@ -20,8 +20,8 @@ fi
 SRC_CHECKOUT=$1
 OUT=$2
 
-IMAGE=trynix-buildqemu-native
-CONTAINER=trynix-build-native-$$
+IMAGE=tryarch-buildqemu-native
+CONTAINER=tryarch-build-native-$$
 JOBS=$(nproc)
 
 WORK=$(mktemp -d)
@@ -30,8 +30,8 @@ echo "copying $SRC_CHECKOUT to $WORK/src"
 rsync -a --exclude .git "$SRC_CHECKOUT/" "$WORK/src/"
 
 # The last stage of the fork's examples/x86_64/image/Dockerfile.qemu,
-# without the kernel and rootfs stages in front of it that trynix
-# builds with nix instead.
+# without the kernel and rootfs stages in front of it that tryarch
+# builds for itself (tools/build-guest.sh).
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "building the toolchain image $IMAGE"
   docker build -t "$IMAGE" - <<'EOF'
@@ -49,7 +49,7 @@ fi
 # below: it makes this build count the monotonic clock the WebAssembly
 # build counts, so the guest calibrates its TSC against the clock it
 # will actually run on.
-PATCHES=${TRYNIX_PATCHES:-$(cd "$(dirname "$0")" && pwd)/../patches}
+PATCHES=${TRYARCH_PATCHES:-$(cd "$(dirname "$0")" && pwd)/../patches}
 for patch in "$PATCHES"/*.patch; do
   [ -e "$patch" ] || continue
   echo "applying $(basename "$patch")"

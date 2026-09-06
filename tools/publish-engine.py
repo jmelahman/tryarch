@@ -2,35 +2,49 @@
 """Publish the engine and the snapshot as a release, and repin them.
 
 The four artifacts (docs/engine.md) go up under a fresh, dated release
-tag, and nix/engine-pins.json is rewritten to name that tag and the
+tag, and engine-pins.json is rewritten to name that release and the
 hash of every file in it, plus the hashes of the guest image the
 snapshot was taken from.
 
+The pins still point at fzakaria/trynix, where the engine and the
+snapshot tryarch serves were published: they are the same bytes, so
+there was nothing to republish. The first publish from here moves them
+to this repository, which is why baseUrl is rewritten too and not just
+the tag.
+
 A tag is never reused. A release is what the pins of a commit resolve
 against, so an asset replaced in place would break every commit that
-pinned the old bytes; a new tag per publish keeps `nix build` working
-on any commit in the history. Dated to the minute in UTC, because two
-publishes in one day have already happened.
+pinned the old bytes; a new tag per publish keeps a checkout of any
+commit in the history buildable. Dated to the minute in UTC, because
+two publishes in one day have already happened.
 
 Usage:
 
-    nix run .#publish-engine -- --dir <directory> --guest <guest image>
+    python3 tools/publish-engine.py --dir <directory>
 
 The directory holds out.js, qemu-system-x86_64.wasm,
-qemu-system-x86_64.worker.js and vm.state; the guest image is the
-`nix build .#guest` output the snapshot was taken against, whose
-hashes the pins record.
+qemu-system-x86_64.worker.js and vm.state. --guest is the guest image
+the snapshot was taken against, whose hashes the pins record; it
+defaults to the committed guest/, which is what a snapshot is normally
+taken from.
+
+Needs the `gh` CLI, authenticated for the repository below.
 """
 
 import argparse
+import base64
 import datetime
+import hashlib
 import json
 import os
 import subprocess
 import sys
 
-REPO = "fzakaria/trynix"
-PINS = os.path.join(os.path.dirname(__file__), "..", "nix", "engine-pins.json")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+REPO = "jmelahman/tryarch"
+PINS = os.path.join(ROOT, "engine-pins.json")
+DEFAULT_GUEST = os.path.join(ROOT, "guest")
 
 ENGINE_FILES = (
     "out.js",
@@ -45,19 +59,27 @@ TAG_TIME_FORMAT = "%Y%m%d-%H%M"
 
 
 def sri(path):
-    """The SRI sha256 nix uses in the pins."""
-    return subprocess.run(
-        ["nix", "hash", "file", "--sri", path],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    """The subresource-integrity sha256 the pins hold: sha256-<base64>.
+
+    The same form tools/fetch-engine.py verifies against, and the same
+    one an <script integrity=> attribute would take, so a pin can be
+    checked by hand with sha256sum and base64.
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256-" + base64.b64encode(digest.digest()).decode()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir", required=True, help="directory holding the four artifacts")
-    parser.add_argument("--guest", required=True, help="the guest image the snapshot was taken from")
+    parser.add_argument(
+        "--guest",
+        default=DEFAULT_GUEST,
+        help="the guest image the snapshot was taken from (default: guest/)",
+    )
     parser.add_argument(
         "--tag",
         default=TAG_PREFIX + datetime.datetime.now(datetime.timezone.utc).strftime(TAG_TIME_FORMAT),
@@ -91,6 +113,7 @@ def main():
         check=True,
     )
 
+    pins["baseUrl"] = f"https://github.com/{REPO}/releases/download"
     pins["tag"] = args.tag
     pins["files"] = files
     pins["guest"] = guest_hashes

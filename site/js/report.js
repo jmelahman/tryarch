@@ -4,9 +4,9 @@
 // nothing is measured at boot, nothing is polled, and the guest is not
 // asked anything. What it carries is what it took to resolve the bugs
 // reported so far — which engine and site were served (a decoder bug
-// hid behind "bad NAR"), which browser (a stream race that only some
-// engines lose), the boot's timeline, the closure, and the last of
-// what the console said.
+// once hid behind "bad archive"), which browser (a stream race that
+// only some engines lose), the boot's timeline, what was unpacked into
+// the share, and the last of what the console said.
 
 import { logLines } from "./log.js";
 import { humanBytes } from "./format.js";
@@ -20,7 +20,7 @@ const SCRIPT_DIRECTORY = /js\.[0-9a-f]+/;
 const ESCAPES = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]/g;
 
 // The site build serving the page: the hashed module directory the
-// build renamed (nix/site.nix).
+// build renamed (tools/build-site.py).
 function siteBuild() {
   const script = document.querySelector('script[type="module"]')?.src ?? "";
   return SCRIPT_DIRECTORY.exec(script)?.[0] ?? "local checkout";
@@ -57,15 +57,18 @@ function browserLines() {
   return lines;
 }
 
-function closureLines(closure) {
-  const infos = [...closure.values()];
-  const download = infos.reduce((sum, i) => sum + i.fileSize, 0);
-  const unpacked = infos.reduce((sum, i) => sum + i.narSize, 0);
+// What was fetched and unpacked: one line per package, with the two
+// sizes that explain both a slow boot (download) and a full MEMFS
+// (unpacked).
+function packageLines(packages) {
+  const download = packages.reduce((sum, one) => sum + one.compressed, 0);
+  const unpacked = packages.reduce((sum, one) => sum + one.unpacked, 0);
   return [
-    `  ${infos.length} paths, ${humanBytes(download)} download, ${humanBytes(unpacked)} unpacked`,
-    ...infos.map(
-      (i) =>
-        `  ${i.storePath} ${i.compression} ${humanBytes(i.fileSize)} -> ${humanBytes(i.narSize)}`,
+    `  ${packages.length} packages, ${humanBytes(download)} download, ${humanBytes(unpacked)} unpacked`,
+    ...packages.map(
+      ({ build, compressed, unpacked: size, files }) =>
+        `  ${build.name} ${build.version} ${build.repo} ${build.filename}` +
+        ` ${humanBytes(compressed)}→${humanBytes(size)} ${files} files`,
     ),
   ];
 }
@@ -79,13 +82,19 @@ function consoleLines(transcript) {
     .map((line) => `  ${line}`);
 }
 
-// manifest: assets.json as fetched. closure: digest -> narinfo of what
-// is in the share. terminal: the ghostty terminal, or null before a
-// boot. transcript: what the console has said, or "". boot: a word
-// for how the guest started.
-export function buildReport({ manifest, closure, terminal, transcript, boot }) {
+// manifest: assets.json as fetched. packages: [{build, compressed,
+// unpacked, files}] for what is in the share. terminal: the terminal, or
+// null before a boot. transcript: what the console has said, or "".
+// boot: a word for how the guest started.
+export function buildReport({
+  manifest,
+  packages = [],
+  terminal,
+  transcript,
+  boot,
+}) {
   const sections = [
-    [`trynix report ${new Date().toISOString()}`, [`  ${location.href}`]],
+    [`tryarch report ${new Date().toISOString()}`, [`  ${location.href}`]],
     ["site", [`  ${siteBuild()}`, ...assetLines(manifest)]],
     ["browser", browserLines()],
     [
@@ -97,8 +106,8 @@ export function buildReport({ manifest, closure, terminal, transcript, boot }) {
           ],
     ],
     [
-      "closure",
-      closure.size === 0 ? ["  nothing booted"] : closureLines(closure),
+      "packages",
+      packages.length === 0 ? ["  nothing booted"] : packageLines(packages),
     ],
     [
       "log",

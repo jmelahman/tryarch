@@ -1,102 +1,273 @@
-// Fetching and parsing narinfos from the binary cache, and walking a
-// runtime closure from them. The whole walk is browser fetches against
-// cache.nixos.org — no server anywhere.
-
-import { DIGEST_LENGTH, FETCH_CONCURRENCY } from "./config.js";
-
-// A narinfo is "Key: value" lines. References holds the store basenames
-// of the direct runtime dependencies; a path may reference itself.
-export function parseNarinfo(text) {
-  const fields = {};
-  // A path signed by several keys carries a Sig line each, so they are
-  // collected rather than overwritten.
-  const sigs = [];
-
-  for (const line of text.split("\n")) {
-    const sep = line.indexOf(": ");
-    if (sep === -1) {
-      continue;
-    }
-    const key = line.slice(0, sep);
-    const value = line.slice(sep + 2);
-    if (key === "Sig") {
-      sigs.push(value);
-      continue;
-    }
-    fields[key] = value;
-  }
-
-  return {
-    storePath: fields.StorePath,
-    url: fields.URL,
-    compression: fields.Compression,
-    fileSize: Number(fields.FileSize ?? 0),
-    fileHash: fields.FileHash,
-    narSize: Number(fields.NarSize ?? 0),
-    narHash: fields.NarHash,
-    sigs,
-    references: (fields.References ?? "").split(" ").filter(Boolean),
-  };
-}
-
-// The digest is the leading 32 characters of a store basename.
-export const digestOf = (basename) => basename.slice(0, DIGEST_LENGTH);
-
-// Resolved lazily to avoid a cycle: substituters.js parses narinfos
-// with the function above.
-async function fetchFrom(digest) {
-  const { fetchNarinfo, readSubstituters } = await import("./substituters.js");
-  const { info } = await fetchNarinfo(digest, readSubstituters());
-  return info;
-}
-
-// Breadth-first walk from one root digest to the full runtime closure,
-// FETCH_CONCURRENCY narinfos in flight at a time. Returns a Map of
-// digest -> parsed narinfo in discovery order; onProgress hears the
-// count as it grows.
+// Walking a dependency closure from the selected builds, fetching each
+// package as it is discovered. Every lookup is a browser fetch against
+// the site's own index, a CORS-enabled mirror, or archive.org — no
+// server anywhere.
 //
-// `known` is a closure already walked. Paths in it are neither fetched
-// nor returned, so walking several roots that share a glibc costs one
-// fetch of it rather than one per root.
+// An Arch package names its dependencies loosely: by package name, by
+// a name with a version constraint (`linux-api-headers>=4.10`), or by
+// something only *provided* by a package (`sh`, `libz.so=1-64`). Each
+// is turned into one concrete build here, and the walk keeps one build
+// per package name, the way pacman keeps one installed version.
+//
+// Dependencies of a current build are known from the index, so the
+// walk runs ahead of the downloads; an archived build only says what
+// it needs in its own .PKGINFO, so its dependencies are queued once it
+// has been fetched.
+
+import { PACKAGE_CONCURRENCY, REPOS } from "./config.js";
+import { current, providersOf, refreshRepo } from "./index.js";
+import { fetchPackage, NotFoundError } from "./pkg.js";
+import { parseDepend, satisfies } from "./vercmp.js";
+import { pickBuild, versionsOf } from "./versions.js";
+import { log } from "./log.js";
+
+// A dependency on a shared object (`libz.so=1-64`) is never a package
+// name, so the provides table is consulted straight away rather than
+// after a lookup that cannot succeed.
+const isSoname = (name) => name.includes(".so");
+
+// Strip the version from a provides entry: `libz.so=1-64` provides
+// `libz.so`.
+const providedName = (spec) => parseDepend(spec).name;
+
+// Walk from `roots` (Build[], selection order), fetching at most
+// PACKAGE_CONCURRENCY packages at a time. Each fetched package is handed
+// to `onPackage(pkg)` as soon as it is unpacked and is not kept here.
+//
+// `known` maps the names already in the guest to their builds: they
+// satisfy dependencies but are neither fetched nor reported again.
+// Resolves to { builds, problems }: the builds fetched by this walk in
+// completion order, and what could not be resolved. A dependency that
+// cannot be found is reported and skipped rather than failing the walk:
+// a program is often usable without the one library nothing can name.
+// A root that cannot be fetched fails the walk.
 export async function walkClosure(
-  rootDigest,
-  onProgress = () => {},
-  known = new Map(),
+  roots,
+  {
+    known = new Map(),
+    onDiscover = () => {},
+    onPackage = async () => {},
+    onBytes = () => {},
+    onTotal = () => {},
+  } = {},
 ) {
-  const closure = new Map();
-  if (known.has(rootDigest)) {
-    return closure;
+  // name -> build, for everything queued or present.
+  const visited = new Map(known);
+  // provided name -> build, from the same set.
+  const provided = new Map();
+  for (const build of known.values()) {
+    for (const spec of build.provides ?? []) {
+      provided.set(providedName(spec), build);
+    }
   }
-  const enqueued = new Set([rootDigest, ...known.keys()]);
-  let frontier = [rootDigest];
+  // Dependency names whose resolution is under way or settled, so a
+  // diamond (two packages needing glibc) resolves it once.
+  const resolving = new Map();
 
-  while (frontier.length > 0) {
-    const next = [];
+  const pending = [];
+  const builds = [];
+  const problems = [];
+  let expected = 0;
+  let active = 0;
+  let waiting = [];
 
-    for (let i = 0; i < frontier.length; i += FETCH_CONCURRENCY) {
-      const batch = frontier.slice(i, i + FETCH_CONCURRENCY);
-      const infos = await Promise.all(batch.map(fetchFrom));
+  const wake = () => {
+    for (const resolve of waiting.splice(0)) {
+      resolve();
+    }
+  };
 
-      // Record the batch, then queue every reference the walk has not
-      // seen; the enqueued set is what keeps a diamond dependency from
-      // being fetched twice.
-      for (const [j, info] of infos.entries()) {
-        closure.set(batch[j], info);
-        onProgress(closure.size);
-
-        for (const ref of info.references) {
-          const digest = digestOf(ref);
-          if (enqueued.has(digest)) {
-            continue;
-          }
-          enqueued.add(digest);
-          next.push(digest);
-        }
+  const enqueue = (build, { era, root }) => {
+    visited.set(build.name, build);
+    for (const spec of build.provides ?? []) {
+      if (!provided.has(providedName(spec))) {
+        provided.set(providedName(spec), build);
       }
     }
+    expected += build.size ?? 0;
+    onTotal(expected);
+    onDiscover(build);
+    pending.push({ build, era, root });
+    wake();
+  };
 
-    frontier = next;
+  // One dependency string of a build, in the era its root set.
+  async function resolve(spec, { era, via }) {
+    const constraint = parseDepend(spec);
+    const { name } = constraint;
+
+    const existing = visited.get(name) ?? provided.get(name);
+    if (existing !== undefined) {
+      if (
+        visited.has(name) &&
+        constraint.op !== null &&
+        !satisfies(existing.version, constraint)
+      ) {
+        problems.push(
+          `${via} wants ${spec}, ${name} ${existing.version} is in the closure`,
+        );
+      }
+      return;
+    }
+    if (resolving.has(name)) {
+      return resolving.get(name);
+    }
+    const work = (async () => {
+      const build = await candidateFor(constraint, era);
+      if (build === null) {
+        problems.push(`nothing provides ${spec} (wanted by ${via})`);
+        return;
+      }
+      // Another resolution may have queued it under a provided name in
+      // the meantime.
+      if (!visited.has(build.name)) {
+        enqueue(build, { era, root: false });
+      }
+    })();
+    resolving.set(name, work);
+    return work;
   }
 
-  return closure;
+  // The build that satisfies a constraint: the package of that name
+  // when there is one, else the first package providing the name. In
+  // the current era the index answers; in an archived one, the newest
+  // build no later than the root, so a 2016 program gets a 2016 libc.
+  async function candidateFor(constraint, era) {
+    const { name } = constraint;
+    if (!isSoname(name)) {
+      const direct =
+        era === null
+          ? await current(name)
+          : pickBuild(await versionsOf(name), constraint, { before: era });
+      if (
+        direct !== null &&
+        (era !== null || constraintAllows(direct, constraint))
+      ) {
+        return direct;
+      }
+    }
+    for (const provider of await providersOf(name)) {
+      if (visited.has(provider)) {
+        return visited.get(provider);
+      }
+      const build =
+        era === null
+          ? await current(provider)
+          : pickBuild(
+              await versionsOf(provider),
+              { name: provider, op: null, version: null },
+              { before: era },
+            );
+      if (build !== null) {
+        return build;
+      }
+    }
+    return null;
+  }
+
+  // A current build is taken even when it is short of a version
+  // constraint: the repos are consistent with themselves, and a mismatch
+  // means the index is a few hours behind, which the fetch fallback
+  // will settle. The mismatch is still reported.
+  function constraintAllows(build, constraint) {
+    if (constraint.op === null || satisfies(build.version, constraint)) {
+      return true;
+    }
+    problems.push(
+      `${build.name} ${build.version} is what the repos have; ${constraint.name}${constraint.op}${constraint.version} was asked for`,
+    );
+    return true;
+  }
+
+  // Fetch one build; when its file is gone from every mirror, the repo
+  // has moved on since the index was built, so the repo's own db says
+  // what replaced it.
+  async function fetchFresh(build) {
+    try {
+      return await fetchPackage(build, { onBytes });
+    } catch (err) {
+      if (!(err instanceof NotFoundError) || !REPOS.includes(build.repo)) {
+        throw err;
+      }
+      log(
+        `${build.filename} is gone from the mirrors; refreshing ${build.repo}`,
+      );
+      await refreshRepo(build.repo);
+      const fresh = await current(build.name);
+      if (fresh === null || fresh.filename === build.filename) {
+        throw err;
+      }
+      visited.set(fresh.name, fresh);
+      return fetchPackage(fresh, { onBytes });
+    }
+  }
+
+  async function worker() {
+    for (;;) {
+      if (pending.length === 0) {
+        if (active === 0) {
+          return;
+        }
+        await new Promise((resolve) => waiting.push(resolve));
+        continue;
+      }
+      const { build, era, root } = pending.shift();
+      active += 1;
+      try {
+        const known = build.depends !== null;
+        // Dependencies the index already knows are resolved while the
+        // package is still downloading.
+        const ahead = known
+          ? Promise.all(
+              build.depends.map((spec) =>
+                resolve(spec, { era, via: build.name }),
+              ),
+            )
+          : null;
+        let pkg;
+        try {
+          pkg = await fetchFresh(build);
+        } catch (err) {
+          if (root) {
+            throw err;
+          }
+          problems.push(`${build.name} ${build.version}: ${err.message}`);
+          continue;
+        }
+        builds.push(pkg.build);
+        await onPackage(pkg);
+        if (ahead !== null) {
+          await ahead;
+        } else {
+          await Promise.all(
+            (pkg.build.depends ?? []).map((spec) =>
+              resolve(spec, { era, via: build.name }),
+            ),
+          );
+        }
+      } finally {
+        active -= 1;
+        wake();
+      }
+    }
+  }
+
+  for (const root of roots) {
+    if (visited.has(root.name)) {
+      const have = visited.get(root.name);
+      if (have.version !== root.version) {
+        problems.push(
+          `${root.name} ${root.version} skipped: ${have.version} is already in the closure`,
+        );
+      }
+      continue;
+    }
+    // An archived root sets the era for everything it pulls in; a
+    // current one takes the repos as they are.
+    const era = root.repo === "archive" ? (root.builddate ?? null) : null;
+    enqueue(root, { era, root: true });
+  }
+
+  await Promise.all(Array.from({ length: PACKAGE_CONCURRENCY }, worker));
+  return { builds, problems };
 }

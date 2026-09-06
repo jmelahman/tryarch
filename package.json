@@ -1,5 +1,22 @@
 {
-  "//": "exists only so node treats site/js/*.js as ES modules in tests",
+  "name": "tryarch",
+  "version": "0.0.0",
   "private": true,
-  "type": "module"
+  "description": "Boot any Arch Linux package in your browser",
+  "license": "MIT",
+  "//": "type: module so node treats site/js/*.js as ES modules in the tests. The dependencies are the browser's, not node's: tools/vendor.py copies the handful of files the page loads out of node_modules, so they are devDependencies pinned to an exact version — the page ships these bytes, and a caret would ship different ones tomorrow.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/site/*.test.mjs",
+    "fmt": "prettier --write \"**/*.{js,mjs,css,md}\"",
+    "fmt:check": "prettier --check \"**/*.{js,mjs,css,md}\""
+  },
+  "devDependencies": {
+    "coi-serviceworker": "0.1.7",
+    "fzstd": "0.1.1",
+    "ghostty-web": "0.4.0-next.20.g1858a59",
+    "prettier": "3.8.1",
+    "xterm-pty": "0.10.1",
+    "xzwasm": "0.1.2"
+  }
 }

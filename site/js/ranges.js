@@ -1,92 +1,83 @@
-// The version-range lane: a line of specs, each an attribute and an
-// optional range, resolved against the multiverse index.
+// The spec lane: a line of package specs, each a name and an optional
+// version constraint, resolved against everything the page can reach.
 //
-//   python3@3.10.*  ripgrep  jujutsu@>=0.40
+//   jq  bash@>=5.2  python@3.11.*  glibc@2.40-1
 //
-// Each spec is resolved on its own — the newest version in the index
-// that matches. That is deliberately less than what [grail] does:
-// grail solves for a moment in nixpkgs history where every constraint
-// held *simultaneously*, which is a different (NP-hard) question and
-// the reason it carries a solver. Independent resolution can hand back
-// a set that never coexisted in one nixpkgs, which is fine here —
-// trynix mounts store paths side by side rather than evaluating them
-// together — but it is not a coexistence guarantee, and the page says
-// so with a link.
+// Both spellings are accepted, the site's own "name@constraint" and
+// pacman's bare "name>=5.2", because the second is what a reader has in
+// front of them in a PKGBUILD or a `pacman -Si` listing.
 //
-// [grail]: https://github.com/fzakaria/grail
+// Each spec is resolved on its own: the newest version that matches.
+// That can hand back a set that never coexisted in one repo, which is
+// fine here — packages are unpacked side by side, not solved for — but
+// it is not a coexistence guarantee, and the page says so.
 
-import { versionsOf, compareVersions } from "./multiverse.js";
+import { pickBuild, versionsOf } from "./versions.js";
+import { satisfies } from "./vercmp.js";
 
-// attr, an optional operator, and a version pattern.
-const SPEC = /^([^@\s]+)(?:@(>=|<=|>|<|=)?(.+))?$/;
+// name, an optional "@", an optional operator, and a version pattern.
+const SPEC = /^([^@\s<>=]+)(?:@?(>=|<=|>|<|=)?([^\s]*))?$/;
 
-export function parseSpecs(line) {
-  return line
-    .split(/\s+/)
+export function parseSpecs(text) {
+  return String(text ?? "")
+    .split(/[\s,]+/)
     .filter(Boolean)
-    .map((text) => {
-      const match = SPEC.exec(text);
+    .map((raw) => {
+      const match = SPEC.exec(raw);
       if (match === null) {
-        throw new Error(`cannot parse "${text}"`);
+        throw new Error(`cannot parse "${raw}"`);
       }
-      const [, attr, operator, pattern] = match;
+      const [, name, op, version] = match;
       return {
-        text,
-        attr,
-        operator: operator ?? null,
-        pattern: pattern ?? null,
+        raw,
+        name,
+        op: op ?? null,
+        version: version === "" || version === undefined ? null : version,
       };
     });
 }
 
-// Does one version satisfy one spec? A pattern with no operator is a
-// prefix match, so 3.10.* and 3.10 both accept 3.10.6; with an
-// operator it is a comparison.
-export function matches(spec, version) {
-  if (spec.pattern === null) {
+// Does one build match one spec? A pattern with a "*" is a prefix match
+// on the version string, which is how a reader asks for "any 3.11";
+// everything else is pacman's own comparison, so a constraint without a
+// release ignores the candidate's release.
+export function matches(build, spec) {
+  if (spec.version === null) {
     return true;
   }
 
-  if (spec.operator === null || spec.operator === "=") {
-    const prefix = spec.pattern.replace(/\.?\*$/, "");
-    return version === prefix || version.startsWith(`${prefix}.`);
+  const star = spec.version.indexOf("*");
+  if (star !== -1) {
+    const prefix = spec.version.slice(0, star).replace(/[.-]$/, "");
+    return build.version === prefix || build.version.startsWith(`${prefix}.`);
   }
 
-  const order = compareVersions(version, spec.pattern);
-  switch (spec.operator) {
-    case ">=":
-      return order >= 0;
-    case "<=":
-      return order <= 0;
-    case ">":
-      return order > 0;
-    case "<":
-      return order < 0;
-    default:
-      return false;
-  }
+  // A version with no operator pins it: "jq@1.7.1" is "=1.7.1".
+  return satisfies(build.version, {
+    op: spec.op ?? "=",
+    version: spec.version,
+  });
 }
 
-// Resolve every spec to its newest matching build that the census has
-// not marked dead. Returns { resolved, problems }.
+// Resolve every spec to its newest matching build. Returns
+// { resolved, problems }, with a line of prose per spec that could not
+// be answered.
 export async function resolveSpecs(specs) {
   const resolved = [];
   const problems = [];
 
   for (const spec of specs) {
-    const versions = await versionsOf(spec.attr);
-    if (versions.length === 0) {
-      problems.push(`${spec.attr} is not in the index`);
+    const builds = await versionsOf(spec.name);
+    if (builds.length === 0) {
+      problems.push(`${spec.name} is in no repo the page can reach`);
       continue;
     }
 
-    // versionsOf returns newest first, so the first match wins.
-    const hit = versions.find(
-      (v) => v.alive !== false && matches(spec, v.version),
-    );
-    if (hit === undefined) {
+    const candidates = builds.filter((build) => matches(build, spec));
+    const hit = pickBuild(candidates, null);
+    if (hit === null) {
       problems.push(
-        `no live version of ${spec.attr} matches ${spec.pattern ?? "any"}`,
+        `no version of ${spec.name} matches ${spec.op ?? ""}${spec.version}`,
       );
       continue;
     }

@@ -1,0 +1,8 @@
+# Prettier's defaults, with one thing said out loud: prose in the docs
+# wraps at 80 columns. That is prettier's default width too, but the
+# markdown here is written to be read in a terminal and diffed a line at
+# a time, so it is pinned rather than inherited.
+overrides:
+  - files: "*.md"
+    options:
+      printWidth: 80

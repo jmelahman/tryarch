@@ -1,0 +1,97 @@
+{
+ "created": 1788673325,
+ "dir": "/25/items/archlinux_pkg_jq",
+ "files": [
+  {
+   "crc32": "0496c692",
+   "format": "Metadata",
+   "md5": "9959eb011e0cc0b64c3ab56943240bd2",
+   "mtime": "1750513289",
+   "name": "archlinux_pkg_jq_meta.xml",
+   "sha1": "11e84f567114d0854605d4bb476c9d47fc00fb63",
+   "size": "1240",
+   "source": "original"
+  },
+  {
+   "crc32": "4099f4ea",
+   "format": "Advanced Audio Coding",
+   "height": "0",
+   "length": "5.62",
+   "md5": "fcae8d99f634a11394d75c9c6e2ab1a4",
+   "mtime": "1528307313",
+   "name": "jq-1.5-1-i686.pkg.tar.xz",
+   "sha1": "af65db3cd975c915110789c5a56b5caca8a28692",
+   "size": "259984",
+   "source": "original",
+   "width": "0"
+  },
+  {
+   "crc32": "4291c175",
+   "format": "Unknown",
+   "md5": "0c3a9ddc2ad4466e0770168e03ee5a6f",
+   "mtime": "1528307327",
+   "name": "jq-1.5-1-x86_64.pkg.tar.xz",
+   "sha1": "a2db8496c802871826f260d33581db63338550c2",
+   "size": "192484",
+   "source": "original"
+  },
+  {
+   "crc32": "38ac10db",
+   "format": "Advanced Audio Coding",
+   "height": "0",
+   "length": "2.11",
+   "md5": "c42771409d6b9052aef4f3aa052eee49",
+   "mtime": "1554203679",
+   "name": "jq-1.6-1-x86_64.pkg.tar.xz",
+   "sha1": "a4de4e99e58c79be2a05b73b9982d43eca3ccf47",
+   "size": "206144",
+   "source": "original",
+   "width": "0"
+  },
+  {
+   "crc32": "cf77d3ab",
+   "format": "Zstandard",
+   "md5": "8f6a2c0b12e0eadff8ecf66467ce9e9a",
+   "mtime": "1694077425",
+   "name": "jq-1.7-1-x86_64.pkg.tar.zst",
+   "sha1": "69936063b1894b05f18fa78847233c5b7fb60f45",
+   "size": "292521",
+   "source": "original"
+  },
+  {
+   "crc32": "0372b128",
+   "format": "Zstandard",
+   "md5": "f0256a619c22ac57fc285c8649d8f06d",
+   "mtime": "1702556190",
+   "name": "jq-1.7.1-1-x86_64.pkg.tar.zst",
+   "sha1": "ae48cb36dad816338cec918f903bca8ab2c0ee46",
+   "size": "292822",
+   "source": "original"
+  },
+  {
+   "crc32": "3d3a06b4",
+   "format": "Zstandard",
+   "md5": "5283614746215d04e77bf831670ce501",
+   "mtime": "1717881277",
+   "name": "jq-1.7.1-2-x86_64.pkg.tar.zst",
+   "sha1": "3cf6a2dfcc97e39b48ba27fa7e8dba39b3cdb325",
+   "size": "294184",
+   "source": "original"
+  },
+  {
+   "crc32": "a1e19bb8",
+   "format": "Unknown",
+   "md5": "651793565b5eebb3d74684efbb8347c2",
+   "mtime": "1717881280",
+   "name": "jq-1.7.1-2-x86_64.pkg.tar.zst.sig",
+   "sha1": "d53d44fbec021fda63cd381af1c49f0a350ed921",
+   "size": "566",
+   "source": "original"
+  }
+ ],
+ "files_count": 8,
+ "item_size": 4681760,
+ "metadata": {
+  "identifier": "archlinux_pkg_jq"
+ }
+}

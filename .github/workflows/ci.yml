@@ -1,0 +1,51 @@
+# What has to hold on every push and every pull request, in the order
+# that puts the cheapest answer first.
+#
+# The node suite covers the page's own parsers -- version comparison,
+# tar and repo databases, the pieces with fixtures to check them
+# against. The python suite covers the tools, offline, on trees they
+# build in a tempdir. Then formatting, and then a real build of the
+# site: it downloads and verifies the pinned engine, checks the
+# committed guest image against the same pins, and vendors the browser
+# libraries, so a broken pin or a missing library fails here rather than
+# in a deploy. The package index is left out on purpose -- it needs the
+# Arch mirrors, and a mirror having a bad afternoon is not a reason to
+# fail a pull request.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The same key the pages workflow uses, so the two share one copy
+      # of the 45 MB the engine weighs.
+      - uses: actions/cache@v4
+        with:
+          path: .cache/engine
+          key: engine-${{ hashFiles('engine-pins.json') }}
+
+      - run: npm ci
+
+      - name: Test the page's modules
+        run: npm test
+
+      - name: Test the tools
+        run: python3 -m unittest discover -s tests/tools
+
+      - name: Check formatting
+        run: npm run fmt:check
+
+      - name: Build the site
+        run: python3 tools/build-site.py _site
