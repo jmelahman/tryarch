@@ -12,7 +12,7 @@
     <title>tryarch</title>
     <meta
       name="description"
-      content="Boot anything Arch Linux ever shipped, in your browser: an x86_64 Linux guest in the tab, official Arch packages and their history, no server anywhere."
+      content="Boot any Arch package ever shipped, in a browser: an x86_64 Linux machine in the tab, packages from core, extra and the Arch Linux Archive, no server anywhere."
     />
 
     <link rel="stylesheet" href="style.css" />
@@ -34,7 +34,7 @@
     <meta property="og:site_name" content="tryarch" />
     <meta
       property="og:title"
-      content="tryarch — boot anything Arch Linux ever shipped, in your browser"
+      content="tryarch — boot any Arch package ever shipped, in a browser"
     />
     <meta
       property="og:description"
@@ -73,20 +73,19 @@
       <section class="row hero">
         <div class="tag">tryarch</div>
         <div>
-          <h1>Boot anything Arch Linux ever shipped, in your browser</h1>
+          <h1>Boot any Arch package<br />ever shipped, in a browser</h1>
           <p class="lede">
-            A real x86_64 Linux guest runs in this tab —
+            A real x86_64 Linux machine —
             <a href="https://github.com/ktock/qemu-wasm"
               >QEMU compiled to WebAssembly</a
-            >, with nothing on a server. Pick official Arch packages from
+            >
+            — runs in this tab, with nothing on a server. Pick packages from
             <span class="repo repo-core">core</span> and
             <span class="repo repo-extra">extra</span>, or an older version from
             the
             <a href="https://archive.org/details/archlinuxarchive"
               >Arch Linux Archive</a
-            >
-            on archive.org, and you get a shell with them on <code>PATH</code>.
-            Every version links to the PKGBUILD it was built from.
+            >, and you get a shell with them on <code>PATH</code>.
           </p>
           <p class="hint">
             <a href="about.html">How it works</a> — the machine, the mirrors,
@@ -137,6 +136,10 @@
             >
               Repositories
             </button>
+            <!-- Hidden for now: too little of the AUR builds here to put
+                 the lane on the front of the page (docs/design.md,
+                 "Building a recipe in the guest"). A link that carries
+                 aur= or pkgbuild= still shows it. -->
             <button
               type="button"
               id="tab-build"
@@ -144,6 +147,7 @@
               role="tab"
               aria-selected="false"
               aria-controls="lane-build"
+              hidden
             >
               Build
             </button>

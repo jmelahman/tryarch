@@ -130,8 +130,11 @@
             </li>
             <li>
               AUR packages and PKGBUILDs are built in the machine by makepkg, at emulator speed,
-              with makepkg alone or with gcc — no base-devel, no VCS sources, no test suite. A
-              <code>-bin</code> or <code>any</code> package takes under a minute, a C program many.
+              with makepkg alone or with gcc — no base-devel, no VCS sources, no test suite, and
+              nothing that fetches while it builds, which rules out most of the AUR. The Build
+              lane is hidden for now; a link with <code>aur=</code> or <code>pkgbuild=</code>
+              still reaches it. A <code>-bin</code> or <code>any</code> package takes under a
+              minute, a C program many.
               <a href="https://jamison.lahman.dev/pkglint/">pkglint</a> grades the recipes
               themselves.
             </li>

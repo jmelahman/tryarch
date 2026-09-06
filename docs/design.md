@@ -298,6 +298,23 @@ pkgbase), because aur.archlinux.org sends no CORS headers either; the
 `.SRCINFO` is what the page reads, since makepkg already expanded the
 bash, and the PKGBUILD is what the guest runs.
 
+**The lane is hidden for now.** Three limits, none of which a static
+site can lift, leave too little of the AUR buildable to put the lane on
+the front of the page. A VCS source cannot be made: no git in the tab,
+no network in the guest, and GitHub's tarball endpoints refuse
+cross-origin reads (codeload allows only render.githubusercontent.com;
+api.github.com allows any origin but redirects to codeload). A quarter
+of the AUR's names end in `-git` or another VCS suffix. A build that
+fetches — `go mod download`, cargo, npm, pip — has no network to fetch
+from, which is nearly every Go, Rust and Node package. And a toolchain
+the size of rustc or go, on top of the 814 MB compile closure, is more
+than the tab and the 512 MB guest can hold. What is left — `-bin` and
+`any` packages, small C programs, pure-Python packages — builds, and a
+link that carries `aur=` or `pkgbuild=` shows the lane for it
+(`restore` in `site/js/app.js`); the tab is `hidden` in the markup
+otherwise. A fetch proxy with CORS headers on some other host would
+widen the first limit and only that one.
+
 **Nothing is built on the share.** makepkg creates files, chmods them
 and makes symlinks, and the engine gets all three wrong on a 9p export
 of emscripten's filesystem (below). So the build runs in guest RAM,

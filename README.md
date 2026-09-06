@@ -1,13 +1,14 @@
 # tryarch
 
-Boot anything Arch Linux ever shipped, in your browser:
+Boot any Arch package ever shipped, in a browser:
 https://jamison.lahman.dev/tryarch/
 
 Pick packages from core and extra, or an older version out of the Arch
 Linux Archive, and they are downloaded from an Arch mirror into an
-x86_64 Linux virtual machine running in the tab. Pick a recipe from the
-AUR, or any PKGBUILD by URL, and makepkg builds it inside that machine.
-You get a shell with the package on PATH. Nothing runs on a server —
+x86_64 Linux virtual machine running in the tab. A link can also name a
+recipe from the AUR, or any PKGBUILD by URL, for makepkg to build inside
+that machine. You get a shell with the package on PATH. Nothing runs on
+a server —
 there is no server, only a static site and the mirrors.
 
 ```
@@ -72,7 +73,10 @@ MB, or with gcc, make, binutils and pkgconf when the recipe has a
 `build()` step, about 190 MB. Once the guest is at its prompt makepkg
 runs there, in RAM, and the package it makes is unpacked into the share
 like any download. It takes about half a minute for a package with
-nothing to compile, and the console shows the build as it goes.
+nothing to compile, and the console shows the build as it goes. The
+Build lane is hidden from the page for now — too little of the AUR
+builds this way to lead with it, see the last of the limits below — and
+a link with `aur` or `pkgbuild` is what shows it.
 
 Everything large — the engine, the guest image, the snapshot, every
 package file — is kept in the browser's cache, so booting the same
@@ -157,9 +161,12 @@ the pins, and every six hours.
   multilib, no testing.
 - **Not a build farm.** The AUR ships recipes, not binaries, and the
   recipes are built here at emulator speed with makepkg alone, or
-  makepkg and gcc: no base-devel, no VCS sources, no test suite, and
-  sources only from a host that allows cross-origin reads or from your
-  own disk. A `-bin` or `any` package builds in under a minute; a C
+  makepkg and gcc: no base-devel, no VCS sources, no test suite, no
+  network while it builds (so nothing that runs `go mod download`,
+  cargo, npm or pip), no toolchain the guest cannot hold, and sources
+  only from a host that allows cross-origin reads or from your own
+  disk. That rules out most of the AUR, which is why the lane is hidden
+  for now. A `-bin` or `any` package builds in under a minute; a C
   program takes many. The lint pass makepkg runs over a PKGBUILD is
   skipped, because its several hundred subshells cost minutes under the
   emulator and the page has already read the recipe.

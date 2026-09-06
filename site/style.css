@@ -280,6 +280,11 @@ h1 {
   margin: 0 0 1rem;
   max-width: 22ch;
 }
+/* The masthead breaks where its markup says, two lines, not where a
+   measure would. */
+.hero h1 {
+  max-width: none;
+}
 
 h2 {
   font: 600 1.0625rem/1.3 var(--cond);

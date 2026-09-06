@@ -63,6 +63,7 @@ const rebootLink = document.getElementById("reboot-link");
 const debugLog = document.getElementById("debug-log");
 const addNote = document.getElementById("add-note");
 const indexInfoElement = document.getElementById("index-info");
+const buildTab = document.getElementById("tab-build");
 
 // The selection: name -> { build, pinned }. One version per name, the
 // way pacman installs one; choosing another version of a selected
@@ -879,6 +880,12 @@ async function restore({ pkgs, repos, aur, pkgbuilds }) {
     select(hit, { pinned: true });
   }
 
+  // The Build lane is hidden from the page for now (index.html says
+  // why); a link that carries a recipe is the one way in, and whoever
+  // followed it should see where it went.
+  if (aur.length > 0 || pkgbuilds.length > 0) {
+    buildTab.hidden = false;
+  }
   for (const name of aur) {
     await addAurRecipe(name);
   }
