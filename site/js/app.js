@@ -61,7 +61,6 @@ const consoleVeil = document.getElementById("console-veil");
 const consoleNote = document.getElementById("console-note");
 const rebootLink = document.getElementById("reboot-link");
 const debugLog = document.getElementById("debug-log");
-const addNote = document.getElementById("add-note");
 const indexInfoElement = document.getElementById("index-info");
 const buildTab = document.getElementById("tab-build");
 
@@ -768,7 +767,6 @@ async function boot() {
     reportOutcome(vm, roots, problems);
     bootButton.textContent = "Add to the running VM";
     rebootLink.hidden = false;
-    addNote.hidden = false;
     bootButton.disabled = false;
 
     await ready;
