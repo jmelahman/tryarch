@@ -56,8 +56,9 @@ copy stops around **October 2024** (its newest item was added
 2024-10-10; the newest jq it holds is 1.7.1-2, the newest glibc is
 2.40+r16). Versions that were current after that date and have since
 been superseded exist in no source a browser can reach. The site says so
-in its About section, because a reader who asks for last month's version
-of something deserves an explanation rather than an empty list.
+on its About page (`site/about.html`), and the front page carries the
+date and a link to it, because a reader who asks for last month's
+version of something deserves an explanation rather than an empty list.
 
 Two more sources were checked and are not used: gitlab.archlinux.org's
 API v4 does allow cross-origin reads, which is worth knowing but nothing

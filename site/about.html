@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tryarch — how it works</title>
+    <meta
+      name="description"
+      content="What tryarch is: an x86_64 Linux guest running in the tab, official Arch packages from the mirrors and the Arch Linux Archive, what is verified and what is not."
+    />
+
+    <link rel="stylesheet" href="style.css" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+
+    <link rel="canonical" href="https://jamison.lahman.dev/tryarch/about.html" />
+    <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0a0a0c" media="(prefers-color-scheme: dark)" />
+
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="tryarch" />
+    <meta property="og:title" content="tryarch — how it works" />
+    <meta
+      property="og:description"
+      content="The machine, the mirrors, what is checked and what is missing: how tryarch boots Arch packages with nothing on a server."
+    />
+    <meta property="og:url" content="https://jamison.lahman.dev/tryarch/about.html" />
+
+    <!-- No scripts: this page is prose. The engine, the service worker
+         shim and the modules belong to index.html, which is the only
+         page that boots anything. -->
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <div>
+        <a class="mark" href="."><b>tryarch</b><span>boot any Arch package</span></a>
+        <nav>
+          <a href="about.html" aria-current="page">About</a>
+          <a href="https://github.com/jmelahman/tryarch">Source</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main" class="prose">
+      <section class="row hero">
+        <div class="tag">tryarch</div>
+        <div>
+          <h1>How it works</h1>
+          <p class="lede">
+            tryarch runs a real x86_64 Linux guest in this tab and hands it official Arch
+            packages — current ones from the mirrors, older ones from the Arch Linux Archive.
+            There is no server. What follows is what that machine is, where the bytes come from,
+            what is checked, and what it cannot do.
+          </p>
+        </div>
+      </section>
+
+      <section class="row">
+        <h2 class="tag">Boot</h2>
+        <div>
+          <p>
+            The page fetches a kernel, an initramfs and a resumable QEMU snapshot, then runs
+            <a href="https://github.com/ktock/qemu-wasm">qemu-wasm</a> in a worker. The packages
+            you pick are downloaded and unpacked into the browser's own in-memory filesystem and
+            handed to the guest over virtio-9p as <code>/share</code>, which the guest's init
+            dresses up as an Arch root — <code>/usr</code>, <code>/lib</code>,
+            <code>/etc</code> and a shell on <code>PATH</code>. Resuming the snapshot skips the
+            kernel's start-up, so the prompt arrives in seconds rather than a minute.
+          </p>
+        </div>
+      </section>
+
+      <section class="row">
+        <h2 class="tag">Sources</h2>
+        <div>
+          <p>
+            Current packages come from the five Arch mirrors that allow cross-origin reads —
+            <code>mirror.lcarilla.de</code>, <code>archlinux.mailtunnel.eu</code>,
+            <code>repo.c48.uk</code>, <code>mirror.iusearchbtw.nl</code> and
+            <code>yonderly.org</code> — tried in that order, with the repository database from
+            the same place. Older versions come from the Internet Archive's mirror of the
+            <a href="https://archive.org/details/archlinuxarchive">Arch Linux Archive</a>, one
+            item per package name, read through archive.org's CORS endpoint.
+          </p>
+          <p class="note note-alert">
+            That mirror stops around <b>October 2024</b>. A version that was still current then,
+            or older, is there; a version that came and went after that date is not, and
+            <code>archive.archlinux.org</code> — which does have it — sends no CORS headers, so
+            no page can read it. Those versions are missing from the version list altogether,
+            not listed and unbootable: the list is what the archive holds, plus whatever is
+            current now.
+          </p>
+        </div>
+      </section>
+
+      <section class="row">
+        <h2 class="tag">Integrity</h2>
+        <div>
+          <p>
+            A package from a mirror is verified against the SHA-256 in the repository database; a
+            package from archive.org against the SHA-1 in its metadata. PGP signatures are
+            <b>not</b> checked — the database and the package come from the same host, so the
+            hash proves the transfer, not the packager. What runs is a guest in your tab with no
+            network and no access to your machine, which is what makes that a reasonable trade
+            here and not in a package manager.
+          </p>
+        </div>
+      </section>
+
+      <section class="row">
+        <h2 class="tag">Limits</h2>
+        <div>
+          <ul>
+            <li>
+              <code>.INSTALL</code> scriptlets are never run, so a package that needs
+              post-install work (users, caches, systemd units) arrives unconfigured.
+            </li>
+            <li>
+              Only packages present at boot get their <code>/etc</code> copied into the guest;
+              anything added later keeps its files under <code>/share/etc</code>.
+            </li>
+            <li>
+              AUR packages are recipes, not binaries — there is nothing to fetch, so they cannot
+              be booted. <a href="https://jamison.lahman.dev/pkglint/">pkglint</a> grades those
+              instead.
+            </li>
+            <li>multilib is skipped; only <code>x86_64</code> and <code>any</code> packages.</li>
+            <li>
+              The unpacked tree lives in memory: about 1.2 GB of files at most, with 512 MB of
+              RAM in the guest.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <p class="back"><a href=".">← Pick a package and boot it</a></p>
+    </main>
+
+    <footer>
+      <div>
+        <span>made by <a href="https://jamison.lahman.dev">Jamison Lahman</a></span>
+        <span>based on <a href="https://trynix.dev">trynix</a> by Farid Zakaria</span>
+        <span><a href="https://github.com/jmelahman/tryarch">GitHub</a></span>
+      </div>
+    </footer>
+  </body>
+</html>

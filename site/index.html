@@ -53,7 +53,7 @@
       <div>
         <a class="mark" href="."><b>tryarch</b><span>boot any Arch package</span></a>
         <nav>
-          <a id="nav-about" href="#about">About</a>
+          <a href="about.html">About</a>
           <a href="https://github.com/jmelahman/tryarch">Source</a>
         </nav>
       </div>
@@ -73,6 +73,10 @@
             <a href="https://archive.org/details/archlinuxarchive">Arch Linux Archive</a> on
             archive.org, and you get a shell with them on <code>PATH</code>. Every version links
             to the PKGBUILD it was built from.
+          </p>
+          <p class="hint">
+            <a href="about.html">How it works</a> — the machine, the mirrors, what is checked,
+            and why the archive stops in October 2024.
           </p>
           <p class="eyebrow">Try</p>
           <ul id="examples">
@@ -252,72 +256,6 @@
       </section>
 
       <div id="result" aria-live="polite"></div>
-
-      <section class="row" id="about">
-        <div class="tag">About</div>
-        <div>
-          <h2>How it works</h2>
-          <p>
-            The page fetches a kernel, an initramfs and a resumable QEMU snapshot, then runs
-            qemu-wasm in a worker. The packages you pick are downloaded and unpacked into the
-            browser's own in-memory filesystem and handed to the guest over virtio-9p as
-            <code>/share</code>, which the guest's init dresses up as an Arch root —
-            <code>/usr</code>, <code>/lib</code>, <code>/etc</code> and a shell on
-            <code>PATH</code>. Resuming the snapshot skips the kernel's start-up, so the prompt
-            arrives in seconds rather than a minute.
-          </p>
-
-          <h2>Where the bytes come from</h2>
-          <p>
-            Current packages come from the five Arch mirrors that allow cross-origin reads —
-            <code>mirror.lcarilla.de</code>, <code>archlinux.mailtunnel.eu</code>,
-            <code>repo.c48.uk</code>, <code>mirror.iusearchbtw.nl</code> and
-            <code>yonderly.org</code> — tried in that order, with the repository database from
-            the same place. Older versions come from the Internet Archive's mirror of the Arch
-            Linux Archive, one item per package name, read through archive.org's CORS endpoint.
-          </p>
-          <p class="note note-alert">
-            That mirror stops around <b>October 2024</b>. A version that was still current then,
-            or older, is there; a version that came and went after that date is not, and
-            <code>archive.archlinux.org</code> — which does have it — sends no CORS headers, so
-            no page can read it. Those versions are missing from the version list altogether,
-            not listed and unbootable: the list is what the archive holds, plus whatever is
-            current now.
-          </p>
-
-          <h2>What is checked</h2>
-          <p>
-            A package from a mirror is verified against the SHA-256 in the repository database; a
-            package from archive.org against the SHA-1 in its metadata. PGP signatures are
-            <b>not</b> checked — the database and the package come from the same host, so the
-            hash proves the transfer, not the packager. What runs is a guest in your tab with no
-            network and no access to your machine, which is what makes that a reasonable trade
-            here and not in a package manager.
-          </p>
-
-          <h2>Limits</h2>
-          <ul>
-            <li>
-              <code>.INSTALL</code> scriptlets are never run, so a package that needs
-              post-install work (users, caches, systemd units) arrives unconfigured.
-            </li>
-            <li>
-              Only packages present at boot get their <code>/etc</code> copied into the guest;
-              anything added later keeps its files under <code>/share/etc</code>.
-            </li>
-            <li>
-              AUR packages are recipes, not binaries — there is nothing to fetch, so they cannot
-              be booted. <a href="https://jamison.lahman.dev/pkglint/">pkglint</a> grades those
-              instead.
-            </li>
-            <li>multilib is skipped; only <code>x86_64</code> and <code>any</code> packages.</li>
-            <li>
-              The unpacked tree lives in memory: about 1.2 GB of files at most, with 512 MB of
-              RAM in the guest.
-            </li>
-          </ul>
-        </div>
-      </section>
     </main>
 
     <footer>

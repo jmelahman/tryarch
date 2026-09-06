@@ -233,6 +233,10 @@ pre {
   color: var(--chalk);
   text-decoration: none;
 }
+/* The page you are already on, lit like a hover that will not go away. */
+.topbar nav a[aria-current] {
+  color: var(--chalk);
+}
 
 /* ── page frame ───────────────────────────────────────────────────────── */
 main {
@@ -945,15 +949,31 @@ td.file {
   overflow-wrap: anywhere;
 }
 
-/* ── about ────────────────────────────────────────────────────────────── */
-#about h2:first-child {
+/* ── the about page ───────────────────────────────────────────────────── */
+/* site/about.html is prose in the same margin gutter, with the section name
+   doing the heading's job. A heading that sits in the gutter has the rows
+   either side of it to separate it, so it drops the rule and the space an h2
+   carries in running text. */
+.row > h2.tag {
+  margin: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+/* The first line of a row starts level with its name, not a paragraph's
+   margin below it. */
+.prose .row > div > :first-child {
   margin-top: 0;
 }
-#about li {
-  margin-bottom: 0.4rem;
-}
-#about li:last-child {
+.prose .row > div > :last-child {
   margin-bottom: 0;
+}
+.prose li + li {
+  margin-top: 0.4rem;
+}
+/* The way back, set in the content column like everything else. */
+.back {
+  margin: 0;
+  margin-left: calc(var(--gutter) + var(--gap));
 }
 
 /* ── footer ───────────────────────────────────────────────────────────── */
@@ -1018,7 +1038,8 @@ footer #index-info:empty {
     border-top: 0;
     padding-top: 0;
   }
-  #result {
+  #result,
+  .back {
     margin-left: 0;
   }
 }

@@ -32,8 +32,11 @@
 # revalidated on every load or a new deploy would never be seen. The
 # index is rebuilt every few hours at the same URLs, and a stale shard
 # names package files the mirrors have already deleted, so it is
-# revalidated too.
+# revalidated too. about.html is plain prose, but it is edited in place
+# like any page and shares the stylesheet, so it is revalidated with it.
 /index.html
+  Cache-Control: no-cache
+/about.html
   Cache-Control: no-cache
 /assets.json
   Cache-Control: no-cache
